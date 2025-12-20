@@ -4,7 +4,7 @@ mod kvm;
 
 trait Hypervisor {
     fn create_vm(memory_mb: usize) -> Result<Self> where Self: Sized;
-    fn load_binary(&mut self, binary: &[u8], entry: u64) -> Result<()>;
+    fn load_binary(&mut self, data: &[u8], guest_addr: u64) -> Result<()>;
     fn run(&mut self) -> Result<ExitReason>;
 }
 

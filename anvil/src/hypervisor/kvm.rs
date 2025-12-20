@@ -1,9 +1,10 @@
+use std::io::{self, Error};
 use std::os::fd::FromRawFd;
 use std::os::unix::io::{AsRawFd};
 
 use std::fs::File;
-use std::ptr::{null_mut};
-use libc::{MAP_ANONYMOUS, MAP_PRIVATE, MAP_SHARED, PROT_READ, PROT_WRITE, c_void, ioctl, mmap, munmap};
+use std::ptr::{copy_nonoverlapping, null_mut};
+use libc::{MAP_ANONYMOUS, MAP_PRIVATE, MAP_SHARED, PROT_READ, PROT_WRITE, c_void, ioctl, memcpy, mmap, munmap};
 
 use crate::hypervisor::Hypervisor;
 
@@ -122,5 +123,17 @@ impl Hypervisor for KvmVm {
             run_info: run,
             run_size: run_size as usize
         })
+    }
+    
+    fn load_binary(&mut self, data: &[u8], guest_addr: u64) -> std::io::Result<()> {
+        if self.guest_mem_size < data.len() + guest_addr as usize {
+            return Err(Error::new(io::ErrorKind::Other, "Guest memory underallocated"));
+        }
+        
+        let start = self.guest_mem as u64 + guest_addr;
+        
+        unsafe { copy_nonoverlapping(data.as_ptr(), start as *mut u8, data.len()) };
+        
+        Ok(())
     }
 }
