@@ -1,4 +1,6 @@
 use std::io::Result;
+#[cfg(unix)]
+mod kvm;
 
 trait Hypervisor {
     fn create_vm(memory_mb: usize) -> Result<Self> where Self: Sized;
@@ -13,20 +15,4 @@ pub enum ExitReason {
     Shutdown,
     Error(String),
     DebugPoint
-}
-
-pub struct MockVm;
-
-impl Hypervisor for MockVm {
-    fn create_vm(memory_mb: usize) -> Result<Self> {
-        Ok(Self)
-    }
-    
-    fn load_binary(&mut self, binary: &[u8], entry: u64) -> Result<()> {
-        Ok(())
-    }
-    
-    fn run(&mut self) -> Result<ExitReason> {
-        Ok(ExitReason::Halt)
-    }
 }
