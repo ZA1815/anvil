@@ -1,4 +1,5 @@
 use std::io::Result;
+
 #[cfg(target_os = "linux")]
 mod kvm;
 #[cfg(target_os = "windows")]

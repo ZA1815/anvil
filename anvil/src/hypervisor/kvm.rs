@@ -26,6 +26,8 @@ const KVM_EXIT_INTERNAL_ERROR: u64 = 17;
 // vCPU magic numbers
 const KVM_GET_REGS: u64 = 0x8090ae81;
 const KVM_SET_REGS: u64 = 0x4090ae82;
+const KVM_GET_SREGS: u64 = 0x8138ae83;
+const KVM_SET_SREGS: u64 = 0x4138ae84;
 
 pub struct KvmVm {
     pub kvm_handle: File,
@@ -96,6 +98,55 @@ pub struct KvmRegs {
     pub rflags: u64
 }
 
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct KvmSegment {
+    pub base: u64,
+    pub limit: u32,
+    pub selector: u16,
+    pub type_: u8,
+    pub present: u8,
+    pub dpl: u8,
+    pub db: u8,
+    pub s: u8,
+    pub l: u8,
+    pub g: u8,
+    pub avl: u8,
+    pub unusable: u8,
+    pub padding: u8
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct KvmDtable {
+    pub base: u64,
+    pub limit: u16,
+    pub _padding: [u16; 3]
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct KvmSregs {
+    pub cs: KvmSegment,
+    pub ds: KvmSegment,
+    pub es: KvmSegment,
+    pub fs: KvmSegment,
+    pub gs: KvmSegment,
+    pub ss: KvmSegment,
+    pub tr: KvmSegment,
+    pub ldt: KvmSegment,
+    pub gdt: KvmSegment,
+    pub idt: KvmSegment,
+    pub cr0: u64,
+    pub cr2: u64,
+    pub cr3: u64,
+    pub cr4: u64,
+    pub cr8: u64,
+    pub efer: u64,
+    pub apic_base: u64,
+    pub interrupt_bitmap: [u64; 4]
+}
+
 impl Drop for KvmVm {
     fn drop(&mut self) {
         unsafe {
@@ -163,7 +214,8 @@ impl Hypervisor for KvmVm {
     }
     
     fn load_binary(&mut self, data: &[u8], guest_addr: u64) -> io::Result<()> {
-        if self.guest_mem_size < data.len() + guest_addr as usize {
+        let end_addr = guest_addr.checked_add(data.len() as u64).ok_or(Error::new(io::ErrorKind::Other, "Address overflow"))?;
+        if self.guest_mem_size <  end_addr as usize {
             return Err(Error::new(io::ErrorKind::Other, "Guest memory underallocated"));
         }
         
@@ -176,18 +228,31 @@ impl Hypervisor for KvmVm {
     
     fn set_entry_point(&mut self, addr: u64) -> io::Result<()> {
         let mut regs = KvmRegs::default();
-        let get = unsafe { ioctl(self.vcpu_handle.as_raw_fd(), KVM_GET_REGS, &mut regs) };
-        if get == -1 {
+        let mut sregs = KvmSregs::default();
+        
+        let get_regs = unsafe { ioctl(self.vcpu_handle.as_raw_fd(), KVM_GET_REGS, &mut regs) };
+        if get_regs == -1 {
             return Err(Error::last_os_error());
         }
-        
         regs.rip = addr;
         
-        let set = unsafe { ioctl(self.vcpu_handle.as_raw_fd(), KVM_SET_REGS, &regs) };
-        if set == -1 {
+        let get_sregs = unsafe { ioctl(self.vcpu_handle.as_raw_fd(), KVM_GET_SREGS, &mut sregs) };
+        if get_sregs == -1 {
+            return Err(Error::last_os_error());
+        }
+        sregs.cs.base = 0;
+        sregs.cs.selector = 0;
+        
+        let set_regs = unsafe { ioctl(self.vcpu_handle.as_raw_fd(), KVM_SET_REGS, &regs) };
+        if set_regs == -1 {
             return Err(Error::last_os_error());
         }
         
+        let set_sregs = unsafe { ioctl(self.vcpu_handle.as_raw_fd(), KVM_SET_SREGS, &sregs) };
+        if set_sregs == -1 {
+            return Err(Error::last_os_error());
+        }
+    
         Ok(())
     }
     
