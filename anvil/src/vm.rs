@@ -42,6 +42,7 @@ impl AnvilVm {
                     break VmExitReason::Halt;
                 },
                 ExitReason::IoIn { port, size } => {
+                    // Handle this later
                     continue;
                 },
                 ExitReason::IoOut { port, data } => {
@@ -55,17 +56,37 @@ impl AnvilVm {
                 },
                 ExitReason::FailEntry { hardware_reason, cpu } => {
                     let error_string = match hardware_reason {
-                        
+                        1 => "VMCALL executed in VMX root operation".to_string(),
+                        2 => "VMCLEAR with invalid physical address".to_string(),
+                        3 => "VMCLEAR with VMXON pointer".to_string(),
+                        4 => "VMLAUNCH with non-clear VMCS".to_string(),
+                        5 => "VMRESUME with non-launched VMCS".to_string(),
+                        6 => "VMRESUME after VMXOFF".to_string(),
+                        7 => "VM entry with invalid control field(s)".to_string(),
+                        8 => "VM entry with invalid host-state field(s)".to_string(),
+                        9 => "VMPTRLD with invalid physical address".to_string(),
+                        10 => "VMPTRLD with VMXON pointer".to_string(),
+                        11 => "VMPTRLD with incorrect VMCS revision identifier".to_string(),
+                        12 => "VMREAD/VMWRITE from/to unsupported VMCS component".to_string(),
+                        13 => "VMWRITE to read-only VMCS component".to_string(),
+                        2147483681 => "VM-entry failure due to invalid guest state".to_string(),
+                        2147483682 => "VM-entry failure due to MSR loading".to_string(),
+                        2147483689 => "VM-entry failure due to machine-check event".to_string(),
+                        _ => format!("Unknown Hardware Error: {:#x}", hardware_reason),
                     };
-                    VmExitReason::FailEntry(error_string);
+                    break VmExitReason::FailEntry(format!("FailEntry error: '{}' on vCPU: {}", error_string, cpu));
                 },
                 ExitReason::InternalError { suberror, data } => {
                     let error_string = match suberror {
-                        
+                        1 => "KVM_INTERNAL_ERROR_EMULATION".to_string(),
+                        2 => "KVM_INTERNAL_ERROR_SIMUL_EX".to_string(),
+                        3 => "KVM_INTERNAL_ERROR_DELIVERY_EV".to_string(),
+                        4 => "KVM_INTERNAL_ERROR_UNEXPECTED_EXIT_REASON".to_string(),
+                        _ => format!("Unknown Internal Error: {}", suberror),
                     };
-                    VmExitReason::InternalError(error_string);
+                    break VmExitReason::InternalError(format!("InternalError error: '{}' with data: {:#?}", error_string, data));
                 },
-                ExitReason::Error(reason) => VmExitReason::Error(reason),
+                ExitReason::Error(reason) => break VmExitReason::Error(reason),
                 ExitReason::DebugPoint => {
                     continue;
                 }
