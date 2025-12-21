@@ -23,6 +23,10 @@ const KVM_EXIT_SHUTDOWN: u64 = 8;
 const KVM_EXIT_FAIL_ENTRY: u64 = 9;
 const KVM_EXIT_INTERNAL_ERROR: u64 = 17;
 
+// vCPU magic numbers
+const KVM_GET_REGS: u64 = 0x8090ae81;
+const KVM_SET_REGS: u64 = 0x4090ae82;
+
 pub struct KvmVm {
     pub kvm_handle: File,
     pub vm_handle: File,
@@ -67,6 +71,29 @@ pub struct KvmIo {
     pub port: u16,
     pub count: u32,
     pub data_offset: u64
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct KvmRegs {
+    pub rax: u64,
+    pub rbx: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub rsp: u64,
+    pub rbp: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r10: u64,
+    pub r11: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+    pub rip: u64,
+    pub rflags: u64
 }
 
 impl Drop for KvmVm {
@@ -143,6 +170,23 @@ impl Hypervisor for KvmVm {
         let start = self.guest_mem as u64 + guest_addr;
         
         unsafe { copy_nonoverlapping(data.as_ptr(), start as *mut u8, data.len()) };
+        
+        Ok(())
+    }
+    
+    fn set_entry_point(&mut self, addr: u64) -> io::Result<()> {
+        let mut regs = KvmRegs::default();
+        let get = unsafe { ioctl(self.vcpu_handle.as_raw_fd(), KVM_GET_REGS, &mut regs) };
+        if get == -1 {
+            return Err(Error::last_os_error());
+        }
+        
+        regs.rip = addr;
+        
+        let set = unsafe { ioctl(self.vcpu_handle.as_raw_fd(), KVM_SET_REGS, &regs) };
+        if set == -1 {
+            return Err(Error::last_os_error());
+        }
         
         Ok(())
     }
