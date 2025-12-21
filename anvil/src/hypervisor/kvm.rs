@@ -1,7 +1,7 @@
 use std::io::{self, Error};
 use std::os::fd::FromRawFd;
 use std::os::unix::io::{AsRawFd};
-
+use std::mem::ManuallyDrop;
 use std::fs::File;
 use std::ptr::{copy_nonoverlapping, null_mut, slice_from_raw_parts};
 use libc::{MAP_ANONYMOUS, MAP_PRIVATE, MAP_SHARED, PROT_READ, PROT_WRITE, c_void, ioctl, mmap, munmap};
@@ -61,18 +61,36 @@ pub struct KvmRun {
 }
 
 #[repr(C)]
-pub struct KvmRunUnion {
-    pub io: KvmIo,
+pub union KvmRunUnion {
+    pub io: ManuallyDrop<KvmIo>,
+    pub fail_entry: ManuallyDrop<KvmFailEntry>,
+    pub internal_error: ManuallyDrop<KvmInternalError>,
     pub _padding: [u8; 256]
 }
 
 #[repr(C)]
+#[derive(Debug, Copy, Clone)]
 pub struct KvmIo {
     pub direction: u8,
     pub size: u8,
     pub port: u16,
     pub count: u32,
     pub data_offset: u64
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct KvmFailEntry {
+    pub hardware_entry_failure_reason: u64,
+    pub cpu: u32
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct KvmInternalError {
+    pub suberror: u32,
+    pub ndata: u32,
+    pub data: [u64; 16]
 }
 
 #[repr(C)]
@@ -243,7 +261,7 @@ impl Hypervisor for KvmVm {
         }
         sregs.cs.base = 0;
         sregs.cs.selector = 0;
-        sregs.cs.l = 1;
+        sregs.cs.l = 0; // Change back later, test first in 16-bit then switch back to long mode
         
         let set_regs = unsafe { ioctl(self.vcpu_handle.as_raw_fd(), KVM_SET_REGS, &regs) };
         if set_regs == -1 {
@@ -264,27 +282,48 @@ impl Hypervisor for KvmVm {
             return ExitReason::Error("System-level Error, VM did not pause successfully".to_string());
         }
         
-        let io = unsafe { &(*self.run_info).union.io };
         
         unsafe  {
             match (*self.run_info).exit_reason as u64 {
-                KVM_EXIT_IO => match io.direction {
-                    0 => ExitReason::IoIn { port: io.port, size: io.count as usize },
-                    1 => {
-                        let data_ptr = (self.run_info as *const u8).add(io.data_offset as usize);
-                        
-                        let data_slice = slice_from_raw_parts(data_ptr, (io.count * io.size as u32) as usize);
-                        let data_vec = (*data_slice).to_vec();
-                        
-                        ExitReason::IoOut { port: io.port, data: data_vec }
-                    },
-                    _ => ExitReason::Error("Unknown direction".to_string())
+                KVM_EXIT_IO => {
+                    let io = &(*self.run_info).union.io;
+                    match io.direction {
+                        0 => ExitReason::IoIn { port: io.port, size: io.count as usize },
+                        1 => {
+                            let total_len = match (io.count).checked_mul(io.size as u32) {
+                                Some(val) => val,
+                                None => return ExitReason::Error("Total len out of bounds".to_string())
+                            };
+                            
+                            let end_offset = match io.data_offset.checked_add(total_len as u64) {
+                                Some(val) => val,
+                                None => return ExitReason::Error("Kernel offset overflow".to_string())
+                            };
+                            if end_offset as usize > self.run_size {
+                                return ExitReason::Error("Kernel offset out of bounds".to_string());
+                            }
+                            
+                            let data_ptr = (self.run_info as *const u8).add(io.data_offset as usize);
+                            
+                            let data_slice = slice_from_raw_parts(data_ptr, total_len as usize);
+                            let data_vec = (*data_slice).to_vec();
+                            
+                            ExitReason::IoOut { port: io.port, data: data_vec }
+                        },
+                        _ => ExitReason::Error("Unknown direction".to_string())
+                    }
                 },
                 KVM_EXIT_DEBUG => ExitReason::DebugPoint,
                 KVM_EXIT_HLT => ExitReason::Halt,
                 KVM_EXIT_SHUTDOWN => ExitReason::Shutdown,
-                KVM_EXIT_FAIL_ENTRY => ExitReason::FailEntry,
-                KVM_EXIT_INTERNAL_ERROR => ExitReason::InternalError,
+                KVM_EXIT_FAIL_ENTRY => {
+                    let fe = &(*self.run_info).union.fail_entry;
+                    ExitReason::FailEntry { hardware_reason: fe.hardware_entry_failure_reason, cpu: fe.cpu }
+                },
+                KVM_EXIT_INTERNAL_ERROR => {
+                    let ie = &(*self.run_info).union.internal_error;
+                    ExitReason::InternalError { suberror: ie.suberror, data: ie.data.to_vec() }
+                },
                 _ => ExitReason::Error("Unknown error".to_string())
             }
         }
