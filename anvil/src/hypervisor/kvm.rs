@@ -235,6 +235,7 @@ impl Hypervisor for KvmVm {
             return Err(Error::last_os_error());
         }
         regs.rip = addr;
+        regs.rflags = 0x2;
         
         let get_sregs = unsafe { ioctl(self.vcpu_handle.as_raw_fd(), KVM_GET_SREGS, &mut sregs) };
         if get_sregs == -1 {
@@ -242,6 +243,7 @@ impl Hypervisor for KvmVm {
         }
         sregs.cs.base = 0;
         sregs.cs.selector = 0;
+        sregs.cs.l = 1;
         
         let set_regs = unsafe { ioctl(self.vcpu_handle.as_raw_fd(), KVM_SET_REGS, &regs) };
         if set_regs == -1 {
