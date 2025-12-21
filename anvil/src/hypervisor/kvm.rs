@@ -3,15 +3,25 @@ use std::os::fd::FromRawFd;
 use std::os::unix::io::{AsRawFd};
 
 use std::fs::File;
-use std::ptr::{copy_nonoverlapping, null_mut};
-use libc::{MAP_ANONYMOUS, MAP_PRIVATE, MAP_SHARED, PROT_READ, PROT_WRITE, c_void, ioctl, memcpy, mmap, munmap};
+use std::ptr::{copy_nonoverlapping, null_mut, slice_from_raw_parts};
+use libc::{MAP_ANONYMOUS, MAP_PRIVATE, MAP_SHARED, PROT_READ, PROT_WRITE, c_void, ioctl, mmap, munmap};
 
-use crate::hypervisor::Hypervisor;
+use crate::hypervisor::{ExitReason, Hypervisor};
 
+// VM creation magic numbers
 const KVM_CREATE_VM: u64 = 0xae01;
 const KVM_SET_USER_MEMORY_REGION: u64 = 0x4020ae46;
 const KVM_CREATE_VCPU: u64 = 0xae41;
 const KVM_GET_VCPU_MMAP_SIZE: u64 = 0xae04;
+
+// VM run magic numbers
+const KVM_RUN: u64 = 0xae80;
+const KVM_EXIT_IO: u64 = 2;
+const KVM_EXIT_DEBUG: u64 = 4;
+const KVM_EXIT_HLT: u64 = 5;
+const KVM_EXIT_SHUTDOWN: u64 = 8;
+const KVM_EXIT_FAIL_ENTRY: u64 = 9;
+const KVM_EXIT_INTERNAL_ERROR: u64 = 17;
 
 pub struct KvmVm {
     pub kvm_handle: File,
@@ -41,7 +51,7 @@ pub struct KvmRun {
     pub cr8: u64,
     pub apic_base: u64,
     
-    pub u: KvmRunUnion
+    pub union: KvmRunUnion
 }
 
 #[repr(C)]
@@ -69,7 +79,7 @@ impl Drop for KvmVm {
 }
 
 impl Hypervisor for KvmVm {
-    fn create_vm(memory_mb: usize) -> std::io::Result<Self> where Self: Sized {
+    fn create_vm(memory_mb: usize) -> io::Result<Self> where Self: Sized {
         // Open KVM file (which tells the kernel that we want to use KVM)
         let kvm = File::open("/dev/kvm")?;
         let kvm_fd = kvm.as_raw_fd();
@@ -125,7 +135,7 @@ impl Hypervisor for KvmVm {
         })
     }
     
-    fn load_binary(&mut self, data: &[u8], guest_addr: u64) -> std::io::Result<()> {
+    fn load_binary(&mut self, data: &[u8], guest_addr: u64) -> io::Result<()> {
         if self.guest_mem_size < data.len() + guest_addr as usize {
             return Err(Error::new(io::ErrorKind::Other, "Guest memory underallocated"));
         }
@@ -135,5 +145,37 @@ impl Hypervisor for KvmVm {
         unsafe { copy_nonoverlapping(data.as_ptr(), start as *mut u8, data.len()) };
         
         Ok(())
+    }
+    
+    fn run(&mut self) -> ExitReason {
+        let run = unsafe { ioctl(self.vcpu_handle.as_raw_fd(), KVM_RUN) };
+        if run == -1 {
+            return ExitReason::Error("System-level Error, VM did not pause successfully".to_string());
+        }
+        
+        let io = unsafe { &(*self.run_info).union.io };
+        
+        unsafe  {
+            match (*self.run_info).exit_reason as u64 {
+                KVM_EXIT_IO => match io.direction {
+                    0 => ExitReason::IoIn { port: io.port, size: io.count as usize },
+                    1 => {
+                        let data_ptr = (self.run_info as *const u8).add(io.data_offset as usize);
+                        
+                        let data_slice = slice_from_raw_parts(data_ptr, (io.count * io.size as u32) as usize);
+                        let data_vec = (*data_slice).to_vec();
+                        
+                        ExitReason::IoOut { port: io.port, data: data_vec }
+                    },
+                    _ => ExitReason::Error("Unknown direction".to_string())
+                },
+                KVM_EXIT_DEBUG => ExitReason::DebugPoint,
+                KVM_EXIT_HLT => ExitReason::Halt,
+                KVM_EXIT_SHUTDOWN => ExitReason::Shutdown,
+                KVM_EXIT_FAIL_ENTRY => ExitReason::FailEntry,
+                KVM_EXIT_INTERNAL_ERROR => ExitReason::InternalError,
+                _ => ExitReason::Error("Unknown error".to_string())
+            }
+        }
     }
 }
