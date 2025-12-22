@@ -1,5 +1,3 @@
-use anyhow::Ok;
-
 use crate::hypervisor::{ExitReason, Hypervisor, PlatformHypervisor};
 
 pub struct AnvilVm {

@@ -4,7 +4,8 @@ use std::os::unix::io::{AsRawFd};
 use std::mem::ManuallyDrop;
 use std::fs::File;
 use std::ptr::{copy_nonoverlapping, null_mut, slice_from_raw_parts};
-use libc::{MAP_ANONYMOUS, MAP_PRIVATE, MAP_SHARED, PROT_READ, PROT_WRITE, c_void, ioctl, mmap, munmap};
+use libc::{EINTR, MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, MAP_SHARED, PROT_READ, PROT_WRITE, c_void, ioctl, mmap, munmap};
+use errno;
 
 use crate::hypervisor::{ExitReason, Hypervisor};
 
@@ -29,6 +30,13 @@ const KVM_SET_REGS: u64 = 0x4090ae82;
 const KVM_GET_SREGS: u64 = 0x8138ae83;
 const KVM_SET_SREGS: u64 = 0x4138ae84;
 
+// SRegs bit flips (use later once I move out of real mode)
+const CR0_PE: u64 = 1 << 0;
+const CR0_PG: u64 = 1 << 31;
+const CR4_PAE: u64 = 1 << 5;
+const EFER_LME: u64 = 1 << 8;
+const EFER_LMA: u64 = 1 << 10;
+
 pub struct KvmVm {
     pub kvm_handle: File,
     pub vm_handle: File,
@@ -50,6 +58,9 @@ struct KvmUserspaceMemoryRegion {
 
 #[repr(C)]
 pub struct KvmRun {
+    pub request_interrupt_window: u8,
+    pub immediate_exit: u8,
+    pub padding1: [u8; 6],
     pub exit_reason: u32,
     pub ready_for_interrupt_injection: u8,
     pub if_flag: u8,
@@ -184,13 +195,23 @@ impl Hypervisor for KvmVm {
         let vm_fd = unsafe {
             ioctl(kvm_fd, KVM_CREATE_VM, 0)
         };
+        if vm_fd == -1 {
+            panic!("vm ioctl failed");
+        }
         let vm = unsafe { File::from_raw_fd(vm_fd) };
         
         // Convert the MBs into bytes and mmap the host memory by giving read/write perms and not associating it with a specific file
-        let mem_size = memory_mb * 1024 * 1024;
+        let mem_size = match memory_mb.checked_mul(1024 * 1024) {
+            Some(val) => val,
+            None => return Err(Error::new(io::ErrorKind::Other, "Memory allocated too large for architecture"))
+        };
         let mem = unsafe {
             mmap(null_mut(), mem_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
         };
+        if mem == MAP_FAILED {
+            let err = Error::last_os_error();
+            panic!("mem mmap failed: {}", err);
+        }
         
         // Struct to tell KVM how to access the new mmap'd memory
         let region = KvmUserspaceMemoryRegion {
@@ -203,22 +224,35 @@ impl Hypervisor for KvmVm {
         // Use ioctl to pass in the host memory struct and associate it with the VM
         unsafe {
             ioctl(vm.as_raw_fd(), KVM_SET_USER_MEMORY_REGION, &region);
-        }
+        };
         
         // Use ioctl and the create vCPU magic number to tell KVM to add a single vCPU to the VM
         let vcpu_fd = unsafe {
             ioctl(vm.as_raw_fd(), KVM_CREATE_VCPU, 0)
         };
+        if vcpu_fd == -1 {
+            panic!("create vcpu failed");
+        }
         let vcpu = unsafe { File::from_raw_fd(vcpu_fd) };
         
         // Use ioctl and tell KVM how large the run data will be
         let run_size = unsafe {
-            ioctl(vcpu.as_raw_fd(), KVM_GET_VCPU_MMAP_SIZE, 0)
+            ioctl(kvm_fd, KVM_GET_VCPU_MMAP_SIZE, 0)
         };
+        if run_size == -1 {
+            panic!("run_size ioctl failed");
+        }
         // Actually mmap the run data
         let run = unsafe {
-            mmap(null_mut(), run_size as usize, PROT_READ | PROT_WRITE, MAP_SHARED, vcpu.as_raw_fd(), 0) as *mut KvmRun
+            mmap(null_mut(), run_size as usize, PROT_READ | PROT_WRITE, MAP_SHARED, vcpu.as_raw_fd(), 0)
         };
+        
+        if run == MAP_FAILED {
+            let err = Error::last_os_error();
+            panic!("run mmap failed: {}", err);
+        }
+        
+        let kvm_run = run as *mut KvmRun;
         
         Ok(KvmVm {
             kvm_handle: kvm,
@@ -226,7 +260,7 @@ impl Hypervisor for KvmVm {
             vcpu_handle: vcpu,
             guest_mem: mem,
             guest_mem_size: mem_size,
-            run_info: run,
+            run_info: kvm_run,
             run_size: run_size as usize
         })
     }
@@ -261,7 +295,6 @@ impl Hypervisor for KvmVm {
         }
         sregs.cs.base = 0;
         sregs.cs.selector = 0;
-        sregs.cs.l = 0; // Change back later, test first in 16-bit then switch back to long mode
         
         let set_regs = unsafe { ioctl(self.vcpu_handle.as_raw_fd(), KVM_SET_REGS, &regs) };
         if set_regs == -1 {
@@ -277,11 +310,23 @@ impl Hypervisor for KvmVm {
     }
     
     fn run(&mut self) -> ExitReason {
-        let run = unsafe { ioctl(self.vcpu_handle.as_raw_fd(), KVM_RUN) };
-        if run == -1 {
-            return ExitReason::Error("System-level Error, VM did not pause successfully".to_string());
-        }
+        // This is here for weird sync issue, it fixed the register pointer issue
+        let mut regs = KvmRegs::default();
+        unsafe { ioctl(self.vcpu_handle.as_raw_fd(), KVM_GET_REGS, &mut regs) };
         
+        loop {
+            let ret = unsafe { ioctl(self.vcpu_handle.as_raw_fd(), KVM_RUN) };
+            if ret == 0 {
+                break;
+            }
+            
+            let err = errno::errno().0;
+            if err == EINTR {
+                continue;
+            }
+            
+            return ExitReason::Error(format!("KVM_RUN failed: errno = {}", err));
+        }
         
         unsafe  {
             match (*self.run_info).exit_reason as u64 {
