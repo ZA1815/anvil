@@ -4,6 +4,10 @@ use std::ptr::copy_nonoverlapping;
 
 use windows::Win32::System::Hypervisor::{
     WHV_PARTITION_HANDLE,
+    WHV_REGISTER_NAME,
+    WHV_REGISTER_VALUE,
+    WHV_X64_SEGMENT_REGISTER,
+    WHV_X64_SEGMENT_REGISTER_0,
     WHvCreatePartition,
     WHvCreateVirtualProcessor,
     WHvMapGpaRange,
@@ -12,7 +16,11 @@ use windows::Win32::System::Hypervisor::{
     WHvMapGpaRangeFlagWrite,
     WHvPartitionPropertyCodeProcessorCount,
     WHvSetPartitionProperty,
-    WHvSetupPartition
+    WHvSetupPartition,
+    WHvSetVirtualProcessorRegisters,
+    WHvX64RegisterRip,
+    WHvX64RegisterRflags,
+    WHvX64RegisterCs
 };
 use windows::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
 
@@ -75,7 +83,28 @@ impl Hypervisor for HyperVVm {
     }
     
     fn set_entry_point(&mut self, addr: u64) -> std::io::Result<()> {
+        let reg_keys: [WHV_REGISTER_NAME; 3] = [
+            WHvX64RegisterRip,
+            WHvX64RegisterRflags,
+            WHvX64RegisterCs
+        ];
+        let cs = WHV_X64_SEGMENT_REGISTER {
+            Base: 0,
+            Limit: 0xFFFF,
+            Selector: 0,
+            Anonymous: WHV_X64_SEGMENT_REGISTER_0 {
+                Attributes: 0x9B
+            }
+        };
+        let reg_values: [WHV_REGISTER_VALUE; 3] = [
+            WHV_REGISTER_VALUE { Reg64: addr },
+            WHV_REGISTER_VALUE { Reg64: 0x2 },
+            WHV_REGISTER_VALUE { Segment: cs }
+        ];
         
+        unsafe { WHvSetVirtualProcessorRegisters(self.partition, 0, reg_keys.as_ptr(), 2, reg_values.as_ptr())? };
+        
+        Ok(())
     }
     
     fn run(&mut self) -> ExitReason {
