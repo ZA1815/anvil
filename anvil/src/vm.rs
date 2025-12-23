@@ -1,4 +1,4 @@
-use crate::hypervisor::{ExitReason, Hypervisor, PlatformHypervisor};
+use crate::hypervisor::{CpuMode, ExitReason, Hypervisor, PlatformHypervisor};
 
 pub struct AnvilVm {
     hypervisor: PlatformHypervisor
@@ -27,8 +27,8 @@ impl AnvilVm {
         Ok(())
     }
     
-    pub fn set_entry_point(&mut self, addr: u64) -> anyhow::Result<()> {
-        self.hypervisor.set_entry_point(addr)?;
+    pub fn set_entry_point(&mut self, addr: u64, cpu_mode: CpuMode) -> anyhow::Result<()> {
+        self.hypervisor.set_entry_point(addr, cpu_mode)?;
         
         Ok(())
     }

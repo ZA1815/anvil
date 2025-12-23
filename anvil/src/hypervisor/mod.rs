@@ -13,7 +13,7 @@ pub type PlatformHypervisor = hyperv::HyperVVm;
 pub trait Hypervisor {
     fn create_vm(memory_mb: usize) -> Result<Self> where Self: Sized;
     fn load_binary(&mut self, data: &[u8], guest_addr: u64) -> Result<()>;
-    fn set_entry_point(&mut self, addr: u64) -> Result<()>;
+    fn set_entry_point(&mut self, addr: u64, cpu_mode: CpuMode) -> Result<()>;
     fn run(&mut self) -> ExitReason;
 }
 
@@ -26,4 +26,10 @@ pub enum ExitReason {
     InternalError { suberror: u32, data: Vec<u64> },
     Error(String),
     DebugPoint
+}
+
+pub enum CpuMode {
+    Real,
+    Protected,
+    Long
 }

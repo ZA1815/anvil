@@ -31,7 +31,7 @@ use windows::Win32::System::Hypervisor::{
 };
 use windows::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
 
-use crate::hypervisor::{ExitReason, Hypervisor};
+use crate::hypervisor::{CpuMode, ExitReason, Hypervisor};
 
 pub struct HyperVVm {
     pub partition: WHV_PARTITION_HANDLE,
@@ -89,7 +89,7 @@ impl Hypervisor for HyperVVm {
         Ok(())
     }
     
-    fn set_entry_point(&mut self, addr: u64) -> std::io::Result<()> {
+    fn set_entry_point(&mut self, addr: u64, cpu_mode: CpuMode) -> std::io::Result<()> {
         let reg_keys: [WHV_REGISTER_NAME; 3] = [
             WHvX64RegisterRip,
             WHvX64RegisterRflags,

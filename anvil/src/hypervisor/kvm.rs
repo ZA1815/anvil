@@ -7,7 +7,7 @@ use std::ptr::{copy_nonoverlapping, null_mut, slice_from_raw_parts};
 use libc::{EINTR, MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, MAP_SHARED, PROT_READ, PROT_WRITE, c_void, ioctl, mmap, munmap};
 use errno;
 
-use crate::hypervisor::{ExitReason, Hypervisor};
+use crate::hypervisor::{ExitReason, Hypervisor, CpuMode};
 
 // VM creation magic numbers
 const KVM_CREATE_VM: u64 = 0xae01;
@@ -271,6 +271,7 @@ impl Hypervisor for KvmVm {
             return Err(Error::new(io::ErrorKind::Other, "Guest memory underallocated"));
         }
         
+        // This does not check for canonicality currently, have to fix later
         let start = self.guest_mem as u64 + guest_addr;
         
         unsafe { copy_nonoverlapping(data.as_ptr(), start as *mut u8, data.len()) };
@@ -278,7 +279,7 @@ impl Hypervisor for KvmVm {
         Ok(())
     }
     
-    fn set_entry_point(&mut self, addr: u64) -> io::Result<()> {
+    fn set_entry_point(&mut self, addr: u64, cpu_mode: CpuMode) -> io::Result<()> {
         let mut regs = KvmRegs::default();
         let mut sregs = KvmSregs::default();
         
