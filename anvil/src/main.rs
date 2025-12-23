@@ -1,10 +1,11 @@
 mod hypervisor;
 mod vm;
+mod loader;
 
 use clap::Parser;
-use std::fs::read;
 
 use crate::vm::{AnvilVm, VmExitReason};
+use crate::loader::parse_kernel;
 
 #[derive(Parser)]
 #[command(name = "Anvil")]
@@ -20,14 +21,16 @@ struct Cli {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     
-    let binary = read(&cli.kernel)?;
+    let kernel = parse_kernel(&cli.kernel)?;
     
-    println!("[Anvil] Loading kernel: {} ({} bytes)", &cli.kernel, binary.len());
+    println!("[Anvil] Loading kernel: {} ({} bytes)", &cli.kernel, kernel.segments.iter().map(|segment| segment.data.len()).sum::<usize>());
     println!("[Anvil] Memory allocated: {} MB", &cli.memory);
     
     let mut vm = AnvilVm::create_vm(cli.memory)?;
-    vm.load_binary(&binary, 0x1000)?;
-    vm.set_entry_point(0x1000)?;
+    for bin in kernel.segments.iter() {
+        vm.load_binary(&bin.data, bin.guest_addr)?;
+    }
+    vm.set_entry_point(kernel.entry_point, kernel.cpu_mode)?;
     let run = vm.run();
     println!("");
     match run {

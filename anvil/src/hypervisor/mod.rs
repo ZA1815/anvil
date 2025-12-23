@@ -28,6 +28,7 @@ pub enum ExitReason {
     DebugPoint
 }
 
+#[derive(PartialEq, Debug)]
 pub enum CpuMode {
     Real,
     Protected,
