@@ -138,7 +138,7 @@ impl Hypervisor for HyperVVm {
                         let data = (io.Rax as u32).to_le_bytes()[..size].to_vec();
                         
                         let rip = exit_cx.VpContext.Rip as usize;
-                        let byte = *(self.guest_mem.add(rip) as *const u8);
+                        let byte = *((self.guest_mem as *const u8).add(rip) as *const u8);
                         let instruction_len: u64 = match byte {
                             0xEE | 0xEF => 1,
                             0xE6 | 0xE7 => 2,
