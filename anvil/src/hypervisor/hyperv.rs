@@ -1,5 +1,6 @@
 use std::ffi::c_void;
 use std::io::{Error, ErrorKind};
+use std::mem;
 use std::ptr::copy_nonoverlapping;
 
 use windows::Win32::System::Hypervisor::{
@@ -8,6 +9,7 @@ use windows::Win32::System::Hypervisor::{
     WHV_REGISTER_VALUE,
     WHV_X64_SEGMENT_REGISTER,
     WHV_X64_SEGMENT_REGISTER_0,
+    WHV_RUN_VP_EXIT_CONTEXT,
     WHvCreatePartition,
     WHvCreateVirtualProcessor,
     WHvMapGpaRange,
@@ -20,7 +22,12 @@ use windows::Win32::System::Hypervisor::{
     WHvSetVirtualProcessorRegisters,
     WHvX64RegisterRip,
     WHvX64RegisterRflags,
-    WHvX64RegisterCs
+    WHvX64RegisterCs,
+    WHvRunVirtualProcessor,
+    WHvRunVpExitReasonX64Halt,
+    WHvRunVpExitReasonX64IoPortAccess,
+    WHvRunVpExitReasonUnrecoverableException,
+    WHvRunVpExitReasonInvalidVpRegisterValue
 };
 use windows::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
 
@@ -102,12 +109,60 @@ impl Hypervisor for HyperVVm {
             WHV_REGISTER_VALUE { Segment: cs }
         ];
         
-        unsafe { WHvSetVirtualProcessorRegisters(self.partition, 0, reg_keys.as_ptr(), 2, reg_values.as_ptr())? };
+        unsafe { WHvSetVirtualProcessorRegisters(self.partition, 0, reg_keys.as_ptr(), 3, reg_values.as_ptr())? };
         
         Ok(())
     }
     
     fn run(&mut self) -> ExitReason {
+        let mut exit_cx: WHV_RUN_VP_EXIT_CONTEXT = unsafe {  mem::zeroed() };
+        let exit_cx_size = mem::size_of::<WHV_RUN_VP_EXIT_CONTEXT>() as u32;
         
+        let run = unsafe { WHvRunVirtualProcessor(self.partition, 0, &mut exit_cx as *mut _ as *mut _, exit_cx_size) };
+        
+        if let Err(e) = run {
+            return ExitReason::Error(format!("WHvRunVirtualProcessor failed {:#?}", e));
+        }
+        
+        #[allow(non_upper_case_globals)]
+        unsafe {
+            match exit_cx.ExitReason {
+                WHvRunVpExitReasonX64Halt => ExitReason::Halt,
+                WHvRunVpExitReasonX64IoPortAccess => {
+                    let io = exit_cx.Anonymous.IoPortAccess;
+                    let port = io.PortNumber;
+                    let size = ((io.AccessInfo.Anonymous._bitfield >> 1) & 0b111) as usize;
+                    let is_write = (io.AccessInfo.Anonymous._bitfield & 0b1) != 0;
+                    
+                    if is_write {
+                        let data = (io.Rax as u32).to_le_bytes()[..size].to_vec();
+                        
+                        let rip = exit_cx.VpContext.Rip as usize;
+                        let byte = *(self.guest_mem.add(rip) as *const u8);
+                        let instruction_len: u64 = match byte {
+                            0xEE | 0xEF => 1,
+                            0xE6 | 0xE7 => 2,
+                            _ => return ExitReason::Error(format!("Unknown IO instruction: {:#x}", byte))
+                        };
+                        let new_rip = rip as u64 + instruction_len;
+                        
+                        let rip_key: [WHV_REGISTER_NAME; 1] = [WHvX64RegisterRip];
+                        let rip_value: [WHV_REGISTER_VALUE; 1] = [WHV_REGISTER_VALUE { Reg64: new_rip }];
+                        if let Err(e) = WHvSetVirtualProcessorRegisters(self.partition, 0, rip_key.as_ptr(), 1, rip_value.as_ptr())
+                        {
+                            return ExitReason::Error(format!("WHvSetVirtualProcessorRegisters failed {:#?}", e));
+                        }
+                        
+                        ExitReason::IoOut { port, data }
+                    }
+                    else {
+                        ExitReason::IoIn { port, size }
+                    }
+                },
+                WHvRunVpExitReasonUnrecoverableException => ExitReason::Shutdown,
+                WHvRunVpExitReasonInvalidVpRegisterValue => ExitReason::FailEntry { hardware_reason: 0, cpu: 0 },
+                _ => ExitReason::Error(format!("Unhandled WHP exit {:?}", exit_cx.ExitReason))
+            }
+        }
     }
 }
