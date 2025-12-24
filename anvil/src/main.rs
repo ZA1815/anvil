@@ -33,7 +33,6 @@ fn main() -> anyhow::Result<()> {
     }
     vm.set_entry_point(kernel.entry_point, kernel.cpu_mode)?;
     let run = vm.run();
-    println!("");
     match run {
         VmExitReason::Halt => println!("[Anvil] VM exited successfully (Halt)"),
         VmExitReason::Shutdown => println!("[Anvil] VM exited successfully (Shutdown)"),

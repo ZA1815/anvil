@@ -13,7 +13,7 @@ use windows::Win32::System::Hypervisor::{
     WHvRunVpExitReasonUnrecoverableException, WHvRunVpExitReasonX64Halt,
     WHvRunVpExitReasonX64IoPortAccess, WHvSetPartitionProperty, WHvSetVirtualProcessorRegisters,
     WHvSetupPartition, WHvX64RegisterCr0, WHvX64RegisterCs, WHvX64RegisterDs, WHvX64RegisterGdtr,
-    WHvX64RegisterRflags, WHvX64RegisterRip, WHvX64RegisterSs,
+    WHvX64RegisterRax, WHvX64RegisterRflags, WHvX64RegisterRip, WHvX64RegisterSs
 };
 use windows::Win32::System::Memory::{MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc};
 
@@ -133,7 +133,7 @@ impl Hypervisor for HyperVVm {
                 Base: 0,
                 Limit: 0xFFFFFFFF,
                 Selector: 0x08,
-                Anonymous: WHV_X64_SEGMENT_REGISTER_0 { Attributes: 0x409B },
+                Anonymous: WHV_X64_SEGMENT_REGISTER_0 { Attributes: 0xC09B },
             },
             // Placeholder, change later
             CpuMode::Long => WHV_X64_SEGMENT_REGISTER {
@@ -154,7 +154,7 @@ impl Hypervisor for HyperVVm {
                 Base: 0,
                 Limit: 0xFFFFFFFF,
                 Selector: 0x10,
-                Anonymous: WHV_X64_SEGMENT_REGISTER_0 { Attributes: 0x4093 },
+                Anonymous: WHV_X64_SEGMENT_REGISTER_0 { Attributes: 0xC093 },
             },
             // Placeholder, change later
             CpuMode::Long => WHV_X64_SEGMENT_REGISTER {
@@ -175,7 +175,7 @@ impl Hypervisor for HyperVVm {
                 Base: 0,
                 Limit: 0xFFFFFFFF,
                 Selector: 0x10,
-                Anonymous: WHV_X64_SEGMENT_REGISTER_0 { Attributes: 0x4093 },
+                Anonymous: WHV_X64_SEGMENT_REGISTER_0 { Attributes: 0xC093 },
             },
             // Placeholder, change later
             CpuMode::Long => WHV_X64_SEGMENT_REGISTER {
@@ -275,33 +275,43 @@ impl Hypervisor for HyperVVm {
                         let instruction_len: u64 = match byte {
                             0xEE | 0xEF => 1,
                             0xE6 | 0xE7 => 2,
-                            _ => {
-                                return ExitReason::Error(format!(
-                                    "Unknown IO instruction: {:#x}",
-                                    byte
-                                ));
-                            }
+                            _ => return ExitReason::Error(format!("Unknown IO instruction: {:#x}", byte))
                         };
                         let new_rip = rip as u64 + instruction_len;
 
                         let rip_key: [WHV_REGISTER_NAME; 1] = [WHvX64RegisterRip];
-                        let rip_value: [WHV_REGISTER_VALUE; 1] =
-                            [WHV_REGISTER_VALUE { Reg64: new_rip }];
-                        if let Err(e) = WHvSetVirtualProcessorRegisters(
-                            self.partition,
-                            0,
-                            rip_key.as_ptr(),
-                            1,
-                            rip_value.as_ptr(),
-                        ) {
-                            return ExitReason::Error(format!(
-                                "WHvSetVirtualProcessorRegisters failed {:#?}",
-                                e
-                            ));
+                        let rip_value: [WHV_REGISTER_VALUE; 1] = [WHV_REGISTER_VALUE { Reg64: new_rip }];
+                        if let Err(e) = WHvSetVirtualProcessorRegisters(self.partition, 0, rip_key.as_ptr(), 1, rip_value.as_ptr()) {
+                            return ExitReason::Error(format!("WHvSetVirtualProcessorRegisters failed {:#?}", e));
                         }
 
                         ExitReason::IoOut { port, data }
-                    } else {
+                    }
+                    else {
+                        let rip = exit_cx.VpContext.Rip as usize;
+                        let byte = *((self.guest_mem as *const u8).add(rip) as *const u8);
+                        let instruction_len: u64 = match byte {
+                            0xEC | 0xED => 1,
+                            0xE4 | 0xE5 => 2,
+                            _ => return ExitReason::Error(format!("Unknown IO instruction: {:#x}", byte))
+                        };
+                        let new_rip = rip as u64 + instruction_len;
+                        
+                        let rip_key: [WHV_REGISTER_NAME; 1] = [WHvX64RegisterRip];
+                        let rip_value: [WHV_REGISTER_VALUE; 1] = [WHV_REGISTER_VALUE { Reg64: new_rip as u64 }];
+                        if let Err(e) = WHvSetVirtualProcessorRegisters(self.partition, 0, rip_key.as_ptr(), 1, rip_value.as_ptr()) {
+                            return ExitReason::Error(format!("WHvSetVirtualProcessorRegisters failed {:#?}", e));
+                        }
+                        
+                        if port == 0x3FD {
+                            let rax_key: [WHV_REGISTER_NAME; 1] = [WHvX64RegisterRax];
+                            let rax_value: [WHV_REGISTER_VALUE; 1] = [WHV_REGISTER_VALUE { Reg64: 0x20 }];
+                            
+                            if let Err(e) = WHvSetVirtualProcessorRegisters(self.partition, 0, rax_key.as_ptr(), 1, rax_value.as_ptr()) {
+                                return ExitReason::Error(format!("WHvSetVirtualProcessorRegisters failed {:#?}", e));
+                            }
+                        }
+                        
                         ExitReason::IoIn { port, size }
                     }
                 }
