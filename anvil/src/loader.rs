@@ -42,9 +42,9 @@ pub fn parse_kernel<P: AsRef<Path>>(path: P) -> io::Result<LoadedKernel> {
 // Guest addr and entry point hardcoded, let user decide later
 fn parse_binary(data: &[u8]) -> LoadedKernel {
     let mut vec = Vec::new();
-    let binary = Segment { data: data.to_vec(), guest_addr: 0x1000, mem_size: data.len() as u64 };
+    let binary = Segment { data: data.to_vec(), guest_addr: 0x2000, mem_size: data.len() as u64 };
     vec.push(binary);
-    LoadedKernel { entry_point: 0x1000, segments: vec, cpu_mode: CpuMode::Real }
+    LoadedKernel { entry_point: 0x2000, segments: vec, cpu_mode: CpuMode::Real }
 }
 
 fn parse_elf(data: &[u8], cpu_mode: CpuMode) -> io::Result<LoadedKernel> {

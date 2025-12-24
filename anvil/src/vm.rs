@@ -21,6 +21,10 @@ impl AnvilVm {
         Ok(Self { hypervisor })
     }
     
+    pub fn setup_gdt(&mut self, guest_gdt_addr: u64, cpu_mode: CpuMode) {
+        self.hypervisor.setup_gdt(guest_gdt_addr, cpu_mode);
+    }
+    
     pub fn load_binary(&mut self, data: &[u8], guest_addr: u64) -> anyhow::Result<()> {
         self.hypervisor.load_binary(data, guest_addr)?;
         
