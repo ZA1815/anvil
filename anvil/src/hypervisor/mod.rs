@@ -34,3 +34,10 @@ pub enum CpuMode {
     Protected,
     Long
 }
+
+// GDT logic to enter 32-bit protected mode
+#[repr(C, packed)]
+pub struct GdtPointer {
+    pub base: u64,
+    pub limit: u16
+}

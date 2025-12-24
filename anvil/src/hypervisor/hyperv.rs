@@ -7,9 +7,9 @@ use windows::Win32::System::Hypervisor::{
     WHV_PARTITION_HANDLE,
     WHV_REGISTER_NAME,
     WHV_REGISTER_VALUE,
+    WHV_RUN_VP_EXIT_CONTEXT,
     WHV_X64_SEGMENT_REGISTER,
     WHV_X64_SEGMENT_REGISTER_0,
-    WHV_RUN_VP_EXIT_CONTEXT,
     WHvCreatePartition,
     WHvCreateVirtualProcessor,
     WHvMapGpaRange,
@@ -17,17 +17,18 @@ use windows::Win32::System::Hypervisor::{
     WHvMapGpaRangeFlagRead,
     WHvMapGpaRangeFlagWrite,
     WHvPartitionPropertyCodeProcessorCount,
-    WHvSetPartitionProperty,
-    WHvSetupPartition,
-    WHvSetVirtualProcessorRegisters,
-    WHvX64RegisterRip,
-    WHvX64RegisterRflags,
-    WHvX64RegisterCs,
     WHvRunVirtualProcessor,
+    WHvRunVpExitReasonInvalidVpRegisterValue,
+    WHvRunVpExitReasonUnrecoverableException,
     WHvRunVpExitReasonX64Halt,
     WHvRunVpExitReasonX64IoPortAccess,
-    WHvRunVpExitReasonUnrecoverableException,
-    WHvRunVpExitReasonInvalidVpRegisterValue
+    WHvSetPartitionProperty,
+    WHvSetVirtualProcessorRegisters,
+    WHvSetupPartition,
+    WHvX64RegisterCr0,
+    WHvX64RegisterCs,
+    WHvX64RegisterRflags,
+    WHvX64RegisterRip
 };
 use windows::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
 
@@ -90,11 +91,7 @@ impl Hypervisor for HyperVVm {
     }
     
     fn set_entry_point(&mut self, addr: u64, cpu_mode: CpuMode) -> std::io::Result<()> {
-        let reg_keys: [WHV_REGISTER_NAME; 3] = [
-            WHvX64RegisterRip,
-            WHvX64RegisterRflags,
-            WHvX64RegisterCs
-        ];
+        let mut reg_keys = vec![WHvX64RegisterRip, WHvX64RegisterRflags, WHvX64RegisterCs];
         let cs = WHV_X64_SEGMENT_REGISTER {
             Base: 0,
             Limit: 0xFFFF,
@@ -103,11 +100,24 @@ impl Hypervisor for HyperVVm {
                 Attributes: 0x9B
             }
         };
-        let reg_values: [WHV_REGISTER_VALUE; 3] = [
-            WHV_REGISTER_VALUE { Reg64: addr },
-            WHV_REGISTER_VALUE { Reg64: 0x2 },
-            WHV_REGISTER_VALUE { Segment: cs }
-        ];
+        let mut reg_values = vec![WHV_REGISTER_VALUE { Reg64: addr }, WHV_REGISTER_VALUE { Reg64: 0x2 }, WHV_REGISTER_VALUE { Segment: cs }];
+        
+        if cpu_mode == CpuMode::Protected {
+            
+        }
+        else if cpu_mode == CpuMode::Long {
+            reg_keys.push(WHvX64RegisterCr0);
+            reg_values.push(value);
+            
+            reg_keys.push(value);
+            reg_values.push(value);
+            
+            reg_keys.push(value);
+            reg_values.push(value);
+            
+            reg_keys.push(value);
+            reg_values.push(value);
+        }
         
         unsafe { WHvSetVirtualProcessorRegisters(self.partition, 0, reg_keys.as_ptr(), 3, reg_values.as_ptr())? };
         
