@@ -4,11 +4,15 @@ use std::io::Result;
 mod kvm;
 #[cfg(target_os = "windows")]
 mod hyperv;
+#[cfg(target_os = "macos")]
+mod hvF;
 
 #[cfg(target_os = "linux")]
 pub type PlatformHypervisor = kvm::KvmVm;
 #[cfg(target_os = "windows")]
 pub type PlatformHypervisor = hyperv::HyperVVm;
+#[cfg(target_os = "macos")]
+pub type PlatformHypervisor = hvF::
 
 pub trait Hypervisor {
     fn create_vm(memory_mb: usize) -> Result<Self> where Self: Sized;
