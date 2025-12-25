@@ -73,10 +73,10 @@ fn parse_elf(data: &[u8], cpu_mode: CpuMode) -> io::Result<LoadedKernel> {
             if ph_type == 1 {
                 let ph_offset = u32::from_le_bytes(data[(pht_base + 0x04) as usize..(pht_base + 0x08) as usize].try_into().expect("Flags for program header not found"));
                 let ph_vaddr = u32::from_le_bytes(data[(pht_base + 0x08) as usize..(pht_base + 0x0C) as usize].try_into().expect("Offset for program header not found"));
-                let ph_paddr = u32::from_le_bytes(data[(pht_base + 0x0C) as usize..(pht_base + 0x10) as usize].try_into().expect("Virtual address for program header not found"));
+                let _ph_paddr = u32::from_le_bytes(data[(pht_base + 0x0C) as usize..(pht_base + 0x10) as usize].try_into().expect("Virtual address for program header not found"));
                 let ph_filesize = u32::from_le_bytes(data[(pht_base + 0x10) as usize..(pht_base + 0x14) as usize].try_into().expect("Physical address for program header not found"));
                 let ph_memsize = u32::from_le_bytes(data[(pht_base + 0x14) as usize..(pht_base + 0x18) as usize].try_into().expect("File size for program header not found"));
-                let ph_flags = u32::from_le_bytes(data[(pht_base + 0x18) as usize..(pht_base + 0x1C) as usize].try_into().expect("Memory size for program header not found"));
+                let _ph_flags = u32::from_le_bytes(data[(pht_base + 0x18) as usize..(pht_base + 0x1C) as usize].try_into().expect("Memory size for program header not found"));
                 
                 if (ph_offset + ph_filesize) as usize > data.len() {
                     return Err(Error::new(io::ErrorKind::Other, "Size of program header file greater than ELF file"));
@@ -122,10 +122,10 @@ fn parse_elf(data: &[u8], cpu_mode: CpuMode) -> io::Result<LoadedKernel> {
             let pht_base = pht_offset + (i * ph_size) as u64;
             let ph_type = u32::from_le_bytes(data[pht_base as usize..(pht_base + 0x04) as usize].try_into().expect("Type for program header not found"));
             if ph_type == 1 {
-                let ph_flags = u32::from_le_bytes(data[(pht_base + 0x04) as usize..(pht_base + 0x08) as usize].try_into().expect("Flags for program header not found"));
+                let _ph_flags = u32::from_le_bytes(data[(pht_base + 0x04) as usize..(pht_base + 0x08) as usize].try_into().expect("Flags for program header not found"));
                 let ph_offset = u64::from_le_bytes(data[(pht_base + 0x08) as usize..(pht_base + 0x10) as usize].try_into().expect("Offset for program header not found"));
                 let ph_vaddr = u64::from_le_bytes(data[(pht_base + 0x10) as usize..(pht_base + 0x18) as usize].try_into().expect("Virtual address for program header not found"));
-                let ph_paddr = u64::from_le_bytes(data[(pht_base + 0x18) as usize..(pht_base + 0x20) as usize].try_into().expect("Physical address for program header not found"));
+                let _ph_paddr = u64::from_le_bytes(data[(pht_base + 0x18) as usize..(pht_base + 0x20) as usize].try_into().expect("Physical address for program header not found"));
                 let ph_filesize = u64::from_le_bytes(data[(pht_base + 0x20) as usize..(pht_base + 0x28) as usize].try_into().expect("File size for program header not found"));
                 let ph_memsize = u64::from_le_bytes(data[(pht_base + 0x28) as usize..(pht_base + 0x30) as usize].try_into().expect("Memory size for program header not found"));
                 
