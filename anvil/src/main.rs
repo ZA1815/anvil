@@ -44,6 +44,7 @@ fn main() -> anyhow::Result<()> {
             
             let mut vm = AnvilVm::create_vm(memory)?;
             vm.setup_gdt(0x0000, kernel.cpu_mode);
+            vm.setup_pts(memory, kernel.cpu_mode);
             for bin in kernel.segments.iter() {
                 vm.load_binary(&bin.data, bin.guest_addr)?;
             }

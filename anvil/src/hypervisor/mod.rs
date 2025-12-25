@@ -18,6 +18,7 @@ pub trait Hypervisor {
     fn create_vm(memory_mb: usize) -> Result<Self> where Self: Sized;
     fn load_binary(&mut self, data: &[u8], guest_addr: u64) -> Result<()>;
     fn setup_gdt(&mut self, guest_gdt_addr: u64, cpu_mode: CpuMode);
+    fn setup_pts(&mut self, memory_mb: usize, cpu_mode: CpuMode);
     // Before releasing, make sure that GDT is loaded after binaries/elf
     fn set_entry_point(&mut self, addr: u64, cpu_mode: CpuMode) -> Result<()>;
     fn run(&mut self) -> ExitReason;

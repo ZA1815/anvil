@@ -12,7 +12,7 @@ use windows::Win32::System::Hypervisor::{
     WHvRunVirtualProcessor, WHvRunVpExitReasonInvalidVpRegisterValue,
     WHvRunVpExitReasonUnrecoverableException, WHvRunVpExitReasonX64Halt,
     WHvRunVpExitReasonX64IoPortAccess, WHvSetPartitionProperty, WHvSetVirtualProcessorRegisters,
-    WHvSetupPartition, WHvX64RegisterCr0, WHvX64RegisterCs, WHvX64RegisterDs, WHvX64RegisterGdtr,
+    WHvSetupPartition, WHvX64RegisterCr0, WHvX64RegisterCr3, WHvX64RegisterCr4, WHvX64RegisterEfer, WHvX64RegisterCs, WHvX64RegisterDs, WHvX64RegisterGdtr,
     WHvX64RegisterRax, WHvX64RegisterRflags, WHvX64RegisterRip, WHvX64RegisterSs
 };
 use windows::Win32::System::Memory::{MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc};
@@ -24,6 +24,7 @@ pub struct HyperVVm {
     pub guest_mem: *mut c_void,
     pub guest_mem_size: usize,
     pub gdt_table: Option<GdtPointer>,
+    pub page_table: Option<u64>
 }
 
 impl Hypervisor for HyperVVm {
@@ -80,6 +81,7 @@ impl Hypervisor for HyperVVm {
             guest_mem,
             guest_mem_size,
             gdt_table: None,
+            page_table: None
         })
     }
 
@@ -117,7 +119,69 @@ impl Hypervisor for HyperVVm {
                 base: guest_gdt_addr,
             });
         } else if cpu_mode == CpuMode::Long {
-            // Placeholder
+            let gdt_table: [GdtEntry; 3] = [
+                GdtEntry::new(0, 0, 0, 0),
+                GdtEntry::new(0, 0xFFFFF, 0x9A, 0xA),
+                GdtEntry::new(0, 0xFFFFF, 0x92, 0xC),
+            ];
+
+            let gdt_size = size_of_val(&gdt_table);
+
+            let bytes = unsafe { from_raw_parts(gdt_table.as_ptr() as *const u8, gdt_size) };
+            let start = self.guest_mem as u64 + guest_gdt_addr;
+            unsafe { copy_nonoverlapping(bytes.as_ptr(), start as *mut u8, bytes.len()); }
+
+            self.gdt_table = Some(GdtPointer {
+                limit: (gdt_size - 1) as u16,
+                base: guest_gdt_addr,
+            });
+        }
+    }
+    
+    fn setup_pts(&mut self, memory_mb: usize, cpu_mode: CpuMode) {
+        if cpu_mode == CpuMode::Long {
+            let num_entries = memory_mb * 1024 * 1024 / 4096;
+            let num_pts = num_entries.div_ceil(512);
+            let num_pds = num_pts.div_ceil(512);
+            let num_pdpts = num_pds.div_ceil(512);
+            let num_pml4s = num_pdpts.div_ceil(512);
+            
+            let size_bytes = (num_pts + num_pds + num_pdpts + num_pml4s) * 4096;
+            let start_guest_addr = self.guest_mem_size - size_bytes;
+            let start_host_addr = self.guest_mem as usize + start_guest_addr;
+            
+            let pml4s_base_guest = start_guest_addr;
+            let pdpt_base_guest = start_guest_addr + (0x1000 * num_pml4s);
+            let pd_base_guest = pdpt_base_guest + (0x1000 * num_pdpts);
+            let pt_base_guest = pd_base_guest + (0x1000 * num_pds);
+            
+            let pml4s_base_host = start_host_addr;
+            let pdpt_base_host = start_host_addr + (0x1000 * num_pml4s);
+            let pd_base_host = pdpt_base_host + (0x1000 * num_pdpts);
+            let pt_base_host = pd_base_host + (0x1000 * num_pds);
+            
+            for i in 0..num_entries {
+                let entry_location = pt_base_host + (i * 8);
+                let entry = (i * 0x1000) | 0x03;
+                unsafe { *(entry_location as *mut u64) = entry as u64; }
+            }
+            for i in 0..num_pts {
+                let entry_location = pd_base_host + (i * 8);
+                let entry = pt_base_guest + (i * 0x1000) | 0x03;
+                unsafe { *(entry_location as *mut u64) = entry as u64; }
+            }
+            for i in 0..num_pds {
+                let entry_location = pdpt_base_host + (i * 8);
+                let entry = pd_base_guest + (i * 0x1000) | 0x03;
+                unsafe { *(entry_location as *mut u64) = entry as u64; }
+            }
+            for i in 0..num_pdpts {
+                let entry_location = pml4s_base_host + (i * 8);
+                let entry = pdpt_base_guest + (i * 0x1000) | 0x03;
+                unsafe { *(entry_location as *mut u64) = entry as u64; }
+            }
+            
+            self.page_table = Some(pml4s_base_guest as u64)
         }
     }
 
@@ -139,8 +203,8 @@ impl Hypervisor for HyperVVm {
             CpuMode::Long => WHV_X64_SEGMENT_REGISTER {
                 Base: 0,
                 Limit: 0xFFFF,
-                Selector: 0,
-                Anonymous: WHV_X64_SEGMENT_REGISTER_0 { Attributes: 0x9B },
+                Selector: 0x08,
+                Anonymous: WHV_X64_SEGMENT_REGISTER_0 { Attributes: 0xA09B },
             },
         };
         let ds = match cpu_mode {
@@ -156,12 +220,11 @@ impl Hypervisor for HyperVVm {
                 Selector: 0x10,
                 Anonymous: WHV_X64_SEGMENT_REGISTER_0 { Attributes: 0xC093 },
             },
-            // Placeholder, change later
             CpuMode::Long => WHV_X64_SEGMENT_REGISTER {
                 Base: 0,
-                Limit: 0xFFFF,
-                Selector: 0,
-                Anonymous: WHV_X64_SEGMENT_REGISTER_0 { Attributes: 0x9B },
+                Limit: 0xFFFFFFFF,
+                Selector: 0x10,
+                Anonymous: WHV_X64_SEGMENT_REGISTER_0 { Attributes: 0xC093 },
             },
         };
         let ss = match cpu_mode {
@@ -177,12 +240,11 @@ impl Hypervisor for HyperVVm {
                 Selector: 0x10,
                 Anonymous: WHV_X64_SEGMENT_REGISTER_0 { Attributes: 0xC093 },
             },
-            // Placeholder, change later
             CpuMode::Long => WHV_X64_SEGMENT_REGISTER {
                 Base: 0,
-                Limit: 0xFFFF,
-                Selector: 0,
-                Anonymous: WHV_X64_SEGMENT_REGISTER_0 { Attributes: 0x9B },
+                Limit: 0xFFFFFFFF,
+                Selector: 0x10,
+                Anonymous: WHV_X64_SEGMENT_REGISTER_0 { Attributes: 0xC093 },
             },
         };
         let mut reg_keys = vec![
@@ -224,7 +286,41 @@ impl Hypervisor for HyperVVm {
             };
             reg_values.push(WHV_REGISTER_VALUE { Table: gdtr });
         } else if cpu_mode == CpuMode::Long {
-            // Placeholder
+            reg_keys.push(WHvX64RegisterCr3);
+            reg_values.push(WHV_REGISTER_VALUE {
+                Reg64: (self.page_table).ok_or_else(|| {
+                    Error::new(ErrorKind::Other, "Page tables not set up correctly")
+                })?
+            });
+            
+            reg_keys.push(WHvX64RegisterCr4);
+            reg_values.push(WHV_REGISTER_VALUE { Reg64: 0x20 });
+            
+            reg_keys.push(WHvX64RegisterEfer);
+            reg_values.push(WHV_REGISTER_VALUE { Reg64: 0x100 });
+            
+            reg_keys.push(WHvX64RegisterCr0);
+            reg_values.push(WHV_REGISTER_VALUE { Reg64: 0x80000001 });
+            
+            reg_keys.push(WHvX64RegisterGdtr);
+            let gdtr = WHV_X64_TABLE_REGISTER {
+                Base: (self.gdt_table.as_ref().ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::Other,
+                        "Base field in GDT table not set up correctly",
+                    )
+                })?)
+                .base,
+                Limit: (self.gdt_table.as_ref().ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::Other,
+                        "Limit field in GDT table not set up correctly",
+                    )
+                })?)
+                .limit,
+                Pad: [0; 3],
+            };
+            reg_values.push(WHV_REGISTER_VALUE { Table: gdtr });
         }
 
         unsafe {
