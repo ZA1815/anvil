@@ -166,8 +166,8 @@ pub struct KvmSregs {
     pub ss: KvmSegment,
     pub tr: KvmSegment,
     pub ldt: KvmSegment,
-    pub gdt: KvmSegment,
-    pub idt: KvmSegment,
+    pub gdt: KvmDtable,
+    pub idt: KvmDtable,
     pub cr0: u64,
     pub cr2: u64,
     pub cr3: u64,
@@ -379,7 +379,7 @@ impl Hypervisor for KvmVm {
                         "Limit field in GDT table not set up correctly",
                     )
                 })?)
-                .limit as u32;
+                .limit;
             }
             CpuMode::Long => {
                 // Placeholder
@@ -425,12 +425,24 @@ impl Hypervisor for KvmVm {
                     match io.direction {
                         0 => {
                             if io.port == 0x3FD {
+                                let total_len = match (io.count).checked_mul(io.size as u32) {
+                                    Some(val) => val,
+                                    None => return ExitReason::Error("Total len out of bounds".to_string())
+                                };
+                                
+                                let end_offset = match io.data_offset.checked_add(total_len as u64) {
+                                    Some(val) => val,
+                                    None => return ExitReason::Error("Kernel offset overflow".to_string())
+                                };
+                                if end_offset as usize > self.run_size {
+                                    return ExitReason::Error("Kernel offset out of bounds".to_string());
+                                }
+                                
                                 let data_ptr = (self.run_info as *mut u8).add(io.data_offset as usize);
                                 *data_ptr = 0x20;
-                                println!("Wrote 0x20 to offset {}", io.data_offset);
                             }
                             
-                            ExitReason::IoIn { port: io.port, size: io.count as usize }
+                            ExitReason::IoIn { port: io.port, size: io.size as usize }
                         },
                         1 => {
                             let total_len = match (io.count).checked_mul(io.size as u32) {
