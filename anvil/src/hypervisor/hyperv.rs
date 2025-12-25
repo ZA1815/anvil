@@ -305,6 +305,7 @@ impl Hypervisor for HyperVVm {
                         
                         if port == 0x3FD {
                             let rax_key: [WHV_REGISTER_NAME; 1] = [WHvX64RegisterRax];
+                            // Track state on this later instead of just hardcoding 0x20
                             let rax_value: [WHV_REGISTER_VALUE; 1] = [WHV_REGISTER_VALUE { Reg64: 0x20 }];
                             
                             if let Err(e) = WHvSetVirtualProcessorRegisters(self.partition, 0, rax_key.as_ptr(), 1, rax_value.as_ptr()) {

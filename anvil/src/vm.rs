@@ -44,7 +44,7 @@ impl AnvilVm {
                     break VmExitReason::Halt;
                 },
                 ExitReason::IoIn { .. } => {
-                    // Still have to implement this for KVM and Hypervisor.framework
+                    // Still have to implement this Hypervisor.framework
                     continue;
                 },
                 ExitReason::IoOut { port, data } => {

@@ -3,11 +3,12 @@ use std::os::fd::FromRawFd;
 use std::os::unix::io::{AsRawFd};
 use std::mem::ManuallyDrop;
 use std::fs::File;
+use std::slice::from_raw_parts;
 use std::ptr::{copy_nonoverlapping, null_mut, slice_from_raw_parts};
 use libc::{EINTR, MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, MAP_SHARED, PROT_READ, PROT_WRITE, c_void, ioctl, mmap, munmap};
 use errno;
 
-use crate::hypervisor::{ExitReason, Hypervisor, CpuMode};
+use crate::hypervisor::{ExitReason, Hypervisor, CpuMode, GdtEntry, GdtPointer};
 
 // VM creation magic numbers
 const KVM_CREATE_VM: u64 = 0xae01;
@@ -44,7 +45,8 @@ pub struct KvmVm {
     pub guest_mem: *mut c_void,
     pub guest_mem_size: usize,
     pub run_info: *mut KvmRun,
-    pub run_size: usize
+    pub run_size: usize,
+    pub gdt_table: Option<GdtPointer>
 }
 
 #[repr(C)]
@@ -261,7 +263,8 @@ impl Hypervisor for KvmVm {
             guest_mem: mem,
             guest_mem_size: mem_size,
             run_info: kvm_run,
-            run_size: run_size as usize
+            run_size: run_size as usize,
+            gdt_table: None
         })
     }
     
@@ -279,6 +282,29 @@ impl Hypervisor for KvmVm {
         Ok(())
     }
     
+    fn setup_gdt(&mut self, guest_gdt_addr: u64, cpu_mode: CpuMode) {
+        if cpu_mode == CpuMode::Protected {
+            let gdt_table: [GdtEntry; 3] = [
+                GdtEntry::new(0, 0, 0, 0),
+                GdtEntry::new(0, 0xFFFFF, 0x9A, 0xC),
+                GdtEntry::new(0, 0xFFFFF, 0x92, 0xC),
+            ];
+
+            let gdt_size = size_of_val(&gdt_table);
+
+            let bytes = unsafe { from_raw_parts(gdt_table.as_ptr() as *const u8, gdt_size) };
+            let start = self.guest_mem as u64 + guest_gdt_addr;
+            unsafe { copy_nonoverlapping(bytes.as_ptr(), start as *mut u8, bytes.len()); }
+
+            self.gdt_table = Some(GdtPointer {
+                limit: (gdt_size - 1) as u16,
+                base: guest_gdt_addr,
+            });
+        } else if cpu_mode == CpuMode::Long {
+            // Placeholder
+        }
+    }
+    
     fn set_entry_point(&mut self, addr: u64, cpu_mode: CpuMode) -> io::Result<()> {
         let mut regs = KvmRegs::default();
         let mut sregs = KvmSregs::default();
@@ -287,15 +313,78 @@ impl Hypervisor for KvmVm {
         if get_regs == -1 {
             return Err(Error::last_os_error());
         }
-        regs.rip = addr;
-        regs.rflags = 0x2;
         
         let get_sregs = unsafe { ioctl(self.vcpu_handle.as_raw_fd(), KVM_GET_SREGS, &mut sregs) };
         if get_sregs == -1 {
             return Err(Error::last_os_error());
         }
-        sregs.cs.base = 0;
-        sregs.cs.selector = 0;
+        
+        regs.rip = addr;
+        regs.rflags = 0x2;
+        match cpu_mode {
+            CpuMode::Real => {
+                sregs.cs.base = 0;
+                sregs.cs.selector = 0;
+                sregs.cs.limit = 0xFFFF;
+            }
+            CpuMode::Protected => {
+                sregs.cs.base = 0;
+                sregs.cs.selector = 0x08;
+                sregs.cs.limit = 0xFFFFFFFF;
+                sregs.cs.type_ = 0xB;
+                sregs.cs.s = 1;
+                sregs.cs.dpl = 0;
+                sregs.cs.present = 1;
+                sregs.cs.avl = 0;
+                sregs.cs.l = 0;
+                sregs.cs.db = 1;
+                sregs.cs.g = 1;
+                
+                sregs.ds.base = 0;
+                sregs.ds.selector = 0x10;
+                sregs.ds.limit = 0xFFFFFFFF;
+                sregs.ds.type_ = 0x03;
+                sregs.ds.s = 1;
+                sregs.ds.dpl = 0;
+                sregs.ds.present = 1;
+                sregs.ds.avl = 0;
+                sregs.ds.l = 0;
+                sregs.ds.db = 1;
+                sregs.ds.g = 1;
+                
+                sregs.ss.base = 0;
+                sregs.ss.selector = 0x10;
+                sregs.ss.limit = 0xFFFFFFFF;
+                sregs.ss.type_ = 0x03;
+                sregs.ss.s = 1;
+                sregs.ss.dpl = 0;
+                sregs.ss.present = 1;
+                sregs.ss.avl = 0;
+                sregs.ss.l = 0;
+                sregs.ss.db = 1;
+                sregs.ss.g = 1;
+                
+                sregs.cr0 = 0x11;
+                
+                sregs.gdt.base = (self.gdt_table.as_ref().ok_or_else(|| {
+                    Error::new(
+                        io::ErrorKind::Other,
+                        "Base field in GDT table not set up correctly",
+                    )
+                })?)
+                .base;
+                sregs.gdt.limit = (self.gdt_table.as_ref().ok_or_else(|| {
+                    Error::new(
+                        io::ErrorKind::Other,
+                        "Limit field in GDT table not set up correctly",
+                    )
+                })?)
+                .limit as u32;
+            }
+            CpuMode::Long => {
+                // Placeholder
+            }
+        }
         
         let set_regs = unsafe { ioctl(self.vcpu_handle.as_raw_fd(), KVM_SET_REGS, &regs) };
         if set_regs == -1 {
@@ -334,7 +423,15 @@ impl Hypervisor for KvmVm {
                 KVM_EXIT_IO => {
                     let io = &(*self.run_info).union.io;
                     match io.direction {
-                        0 => ExitReason::IoIn { port: io.port, size: io.count as usize },
+                        0 => {
+                            if io.port == 0x3FD {
+                                let data_ptr = (self.run_info as *mut u8).add(io.data_offset as usize);
+                                *data_ptr = 0x20;
+                                println!("Wrote 0x20 to offset {}", io.data_offset);
+                            }
+                            
+                            ExitReason::IoIn { port: io.port, size: io.count as usize }
+                        },
                         1 => {
                             let total_len = match (io.count).checked_mul(io.size as u32) {
                                 Some(val) => val,
