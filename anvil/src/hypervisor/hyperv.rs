@@ -7,15 +7,15 @@ use std::slice::from_raw_parts;
 use windows::Win32::System::Hypervisor::{
     WHV_PARTITION_HANDLE, WHV_REGISTER_NAME, WHV_REGISTER_VALUE, WHV_RUN_VP_EXIT_CONTEXT,
     WHV_X64_SEGMENT_REGISTER, WHV_X64_SEGMENT_REGISTER_0, WHV_X64_TABLE_REGISTER,
-    WHvCreatePartition, WHvCreateVirtualProcessor, WHvMapGpaRange, WHvMapGpaRangeFlagExecute,
+    WHvCreatePartition, WHvDeletePartition, WHvCreateVirtualProcessor, WHvDeleteVirtualProcessor, WHvMapGpaRange, WHvMapGpaRangeFlagExecute,
     WHvMapGpaRangeFlagRead, WHvMapGpaRangeFlagWrite, WHvPartitionPropertyCodeProcessorCount,
     WHvRunVirtualProcessor, WHvRunVpExitReasonInvalidVpRegisterValue,
     WHvRunVpExitReasonUnrecoverableException, WHvRunVpExitReasonX64Halt,
     WHvRunVpExitReasonX64IoPortAccess, WHvSetPartitionProperty, WHvSetVirtualProcessorRegisters,
-    WHvSetupPartition, WHvX64RegisterCr0, WHvX64RegisterCr3, WHvX64RegisterCr4, WHvX64RegisterEfer, WHvX64RegisterCs, WHvX64RegisterDs, WHvX64RegisterGdtr,
-    WHvX64RegisterRax, WHvX64RegisterRflags, WHvX64RegisterRip, WHvX64RegisterSs
+    WHvSetupPartition, WHvX64RegisterCr0, WHvX64RegisterCr3, WHvX64RegisterCr4, WHvX64RegisterEfer, WHvX64RegisterCs,
+    WHvX64RegisterDs, WHvX64RegisterGdtr, WHvX64RegisterRax, WHvX64RegisterRflags, WHvX64RegisterRip, WHvX64RegisterSs
 };
-use windows::Win32::System::Memory::{MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc};
+use windows::Win32::System::Memory::{MEM_COMMIT, MEM_RESERVE, MEM_RELEASE, PAGE_READWRITE, VirtualAlloc, VirtualFree};
 
 use crate::hypervisor::{CpuMode, ExitReason, GdtEntry, GdtPointer, Hypervisor};
 
@@ -25,6 +25,16 @@ pub struct HyperVVm {
     pub guest_mem_size: usize,
     pub gdt_table: Option<GdtPointer>,
     pub page_table: Option<u64>
+}
+
+impl Drop for HyperVVm {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = VirtualFree(self.guest_mem, self.guest_mem_size, MEM_RELEASE);
+            let _ = WHvDeleteVirtualProcessor(self.partition, 0);
+            let _ = WHvDeletePartition(self.partition);
+        }
+    }
 }
 
 impl Hypervisor for HyperVVm {
