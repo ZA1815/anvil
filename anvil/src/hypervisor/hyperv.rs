@@ -3,6 +3,8 @@ use std::io::{Error, ErrorKind};
 use std::mem;
 use std::ptr::copy_nonoverlapping;
 use std::slice::from_raw_parts;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use windows::Win32::System::Hypervisor::{
     WHV_PARTITION_HANDLE, WHV_REGISTER_NAME, WHV_REGISTER_VALUE, WHV_RUN_VP_EXIT_CONTEXT,
@@ -24,7 +26,8 @@ pub struct HyperVVm {
     pub guest_mem: *mut c_void,
     pub guest_mem_size: usize,
     pub gdt_table: Option<GdtPointer>,
-    pub page_table: Option<u64>
+    pub page_table: Option<u64>,
+    pub stop_flag: Arc<AtomicBool>
 }
 
 impl Drop for HyperVVm {

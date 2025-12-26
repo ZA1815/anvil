@@ -2,7 +2,14 @@ mod hypervisor;
 mod vm;
 mod loader;
 
+use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::path::Path;
+use std::sync::mpsc::channel;
+use std::thread;
+use std::time::Duration;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher, Config};
+use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
 
 use crate::vm::{AnvilVm, VmExitReason};
 use crate::loader::parse_kernel;
@@ -32,7 +39,7 @@ enum Commands {
     }
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
     
     match cli.command {
@@ -59,7 +66,63 @@ fn main() -> anyhow::Result<()> {
             };
         },
         Commands::Watch { kernel_file, memory } => {
-            println!("Placeholder");
+            let kernel_file_clone = kernel_file.clone();
+            let vm_handle = thread::spawn(move || -> Result<()> {
+                let kernel = parse_kernel(&kernel_file)?;
+                
+                println!("[Anvil] Loading kernel: {} ({} bytes)", &kernel_file, kernel.segments.iter().map(|segment| segment.data.len()).sum::<usize>());
+                println!("[Anvil] Memory allocated: {} MB", memory);
+                
+                let mut vm = AnvilVm::create_vm(memory)?;
+                vm.setup_gdt(0x0000, kernel.cpu_mode);
+                vm.setup_pts(memory, kernel.cpu_mode);
+                for bin in kernel.segments.iter() {
+                    vm.load_binary(&bin.data, bin.guest_addr)?;
+                }
+                vm.set_entry_point(kernel.entry_point, kernel.cpu_mode)?;
+                let run = vm.run();
+                match run {
+                    VmExitReason::Halt => println!("[Anvil] VM exited successfully (Halt)"),
+                    VmExitReason::Shutdown => println!("[Anvil] VM exited successfully (Shutdown)"),
+                    VmExitReason::FailEntry(string) => println!("[Anvil] VM exited with a failure (Fail Entry): {}", string),
+                    VmExitReason::InternalError(string) => println!("[Anvil] VM exited with a failure (Internal Error): {}", string),
+                    VmExitReason::Error(string) => println!("[Anvil] VM exited with a failure (Unknown): {}", string)
+                };
+                
+                Ok(())
+            });
+            
+            let watch_handle = thread::spawn(move || {
+                let (tx, rx) = channel();
+                
+                let mut debouncer = new_debouncer(Duration::from_millis(500), tx).expect("Failed to create debouncer");
+                let path = Path::new(&kernel_file_clone);
+                let parent = path.parent().unwrap_or(Path::new("."));
+                debouncer.watcher().watch(parent, RecursiveMode::NonRecursive).expect("Failed to watch parent directory");
+                
+                loop {
+                    match rx.recv() {
+                        Ok(Ok(_)) => {
+                            println!("File changed, triggering refresh");
+                        }
+                        Ok(Err(e)) => {
+                            eprintln!("Watch error: {:?}", e);
+                        }
+                        Err(_) => break
+                    }
+                }
+            });
+            
+            match vm_handle.join() {
+                Ok(vm_output) => {
+                    if let Err(e) = vm_output {
+                        eprintln!("[Anvil] VM thread failed with error: {}", e);
+                    }
+                }
+                Err(e) => eprintln!("[Anvil] VM thread panicked {:?}", e)
+            }
+            
+            watch_handle.join().unwrap();
         }
     }
     
