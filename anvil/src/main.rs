@@ -6,14 +6,15 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Hypervisor::WHvCancelRunVirtualProcessor;
+use dunce::canonicalize;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::thread;
 use std::time::Duration;
-use notify::{RecommendedWatcher, RecursiveMode, Watcher, Config};
-use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
+use notify::RecursiveMode;
+use notify_debouncer_mini::new_debouncer;
 use ctrlc;
 
 use crate::hypervisor::CancelToken;
@@ -65,13 +66,13 @@ fn main() -> Result<()> {
                 let parent = path.parent().unwrap_or(Path::new("."));
                 debouncer.watcher().watch(parent, RecursiveMode::NonRecursive).expect("Failed to watch parent directory");
                 
-                loop {
+                'outer: loop {
                     let kernel = parse_kernel(&kernel_file)?;
                     
                     println!("[Anvil] Loading kernel: {} ({} bytes)", &kernel_file, kernel.segments.iter().map(|segment| segment.data.len()).sum::<usize>());
                     println!("[Anvil] Memory allocated: {} MB", memory);
                     
-                    let (mut vm, stop_flag) = AnvilVm::create_vm(memory)?;
+                    let (mut vm, stop_flag, early_end_flag) = AnvilVm::create_vm(memory)?;
                     vm.setup_gdt(0x0000, kernel.cpu_mode);
                     vm.setup_pts(memory, kernel.cpu_mode);
                     for bin in kernel.segments.iter() {
@@ -96,13 +97,30 @@ fn main() -> Result<()> {
                     
                     loop {
                         match rx_watcher.recv_timeout(Duration::from_millis(100)) {
-                            Ok(Ok(_)) => {
-                                println!("File changed, triggering refresh...");
-                                stop_flag.store(true, Ordering::Relaxed);
-                                #[cfg(target_os = "windows")]
-                                unsafe { WHvCancelRunVirtualProcessor(cancel_token, 0, 0) }?;
+                            Ok(Ok(events)) => {
+                                let mut file_found = false;
+                                for event in events.iter() {
+                                    if event.path == canonicalize(path)? {
+                                        file_found = true;
+                                        break;
+                                    }
+                                }
+                                if !file_found {
+                                    continue;
+                                }
+                                println!("\nFile changed, triggering refresh...\n");
+                                if !early_end_flag.load(Ordering::Relaxed) {
+                                    stop_flag.store(true, Ordering::Relaxed);
+                                    #[cfg(target_os = "windows")]
+                                    {
+                                        if cancel_token.0 != 0 && cancel_token.0 != -1 {
+                                            unsafe { WHvCancelRunVirtualProcessor(cancel_token, 0, 0) }?;
+                                        }
+                                    }
+                                    stop_flag.store(false, Ordering::Relaxed);
+                                    early_end_flag.store(false, Ordering::Relaxed);
+                                }
                                 vm_handle.join().unwrap();
-                                stop_flag.store(false, Ordering::Relaxed);
                                 break;
                             }
                             Ok(Err(e)) => {
@@ -110,13 +128,15 @@ fn main() -> Result<()> {
                             }
                             Err(RecvTimeoutError::Timeout) => {
                                 if ctrl_c_clone.load(Ordering::Relaxed) {
-                                    return Ok(());
+                                    break 'outer;
                                 }
                             }
-                            Err(_) => return Ok(())
+                            Err(_) => break 'outer
                         }
                     }
                 }
+                
+                Ok(())
             });
             
             ctrlc::set_handler(move || {
@@ -131,7 +151,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn run_vm(kernel_file: &String, memory: usize, tx: &Sender<CancelToken>) -> Result<Arc<AtomicBool>> {
+fn run_vm(kernel_file: &String, memory: usize, tx: &Sender<CancelToken>) -> Result<()> {
     let kernel = parse_kernel(&kernel_file)?;
     
     println!("[Anvil] Loading kernel: {} ({} bytes)", &kernel_file, kernel.segments.iter().map(|segment| segment.data.len()).sum::<usize>());
@@ -153,5 +173,5 @@ fn run_vm(kernel_file: &String, memory: usize, tx: &Sender<CancelToken>) -> Resu
         VmExitReason::Error(string) => println!("[Anvil] VM exited with a failure (Unknown): {}", string)
     };
     
-    Ok(vm.1)
+    Ok(())
 }

@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1.0.100"
 clap = { version = "4.5.53", features = ["derive"] }
 ctrlc = "3.5.1"
+dunce = "1.0.5"
 errno = "0.3.14"
 libc = "0.2"
 notify = "8.2.0"

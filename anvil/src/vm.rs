@@ -18,11 +18,12 @@ pub enum VmExitReason {
 }
 
 impl AnvilVm {
-    pub fn create_vm(memory_mb: usize) -> anyhow::Result<(Self, Arc<AtomicBool>)> {
+    pub fn create_vm(memory_mb: usize) -> anyhow::Result<(Self, Arc<AtomicBool>, Arc<AtomicBool>)> {
         let hypervisor = PlatformHypervisor::create_vm(memory_mb)?;
         let stop_flag = hypervisor.stop_flag.clone();
+        let early_end_flag = hypervisor.early_end_flag.clone();
         
-        Ok((Self { hypervisor }, stop_flag))
+        Ok((Self { hypervisor }, stop_flag, early_end_flag))
     }
     
     pub fn setup_gdt(&mut self, guest_gdt_addr: u64, cpu_mode: CpuMode) {

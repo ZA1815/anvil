@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 
 use windows::Win32::System::Hypervisor::{
-    WHV_PARTITION_HANDLE, WHV_REGISTER_NAME, WHV_REGISTER_VALUE, WHV_RUN_VP_EXIT_CONTEXT, WHV_X64_SEGMENT_REGISTER, WHV_X64_SEGMENT_REGISTER_0, WHV_X64_TABLE_REGISTER, WHvCancelRunVirtualProcessor, WHvCreatePartition, WHvCreateVirtualProcessor, WHvDeletePartition, WHvDeleteVirtualProcessor, WHvMapGpaRange, WHvMapGpaRangeFlagExecute, WHvMapGpaRangeFlagRead, WHvMapGpaRangeFlagWrite, WHvPartitionPropertyCodeProcessorCount, WHvRunVirtualProcessor, WHvRunVpExitReasonInvalidVpRegisterValue, WHvRunVpExitReasonUnrecoverableException, WHvRunVpExitReasonX64Halt, WHvRunVpExitReasonX64IoPortAccess, WHvSetPartitionProperty, WHvSetVirtualProcessorRegisters, WHvSetupPartition, WHvX64RegisterCr0, WHvX64RegisterCr3, WHvX64RegisterCr4, WHvX64RegisterCs, WHvX64RegisterDs, WHvX64RegisterEfer, WHvX64RegisterGdtr, WHvX64RegisterRax, WHvX64RegisterRflags, WHvX64RegisterRip, WHvX64RegisterSs
+    WHV_PARTITION_HANDLE, WHV_REGISTER_NAME, WHV_REGISTER_VALUE, WHV_RUN_VP_EXIT_CONTEXT, WHV_X64_SEGMENT_REGISTER, WHV_X64_SEGMENT_REGISTER_0, WHV_X64_TABLE_REGISTER, WHvCreatePartition, WHvCreateVirtualProcessor, WHvDeletePartition, WHvDeleteVirtualProcessor, WHvMapGpaRange, WHvMapGpaRangeFlagExecute, WHvMapGpaRangeFlagRead, WHvMapGpaRangeFlagWrite, WHvPartitionPropertyCodeProcessorCount, WHvRunVirtualProcessor, WHvRunVpExitReasonInvalidVpRegisterValue, WHvRunVpExitReasonUnrecoverableException, WHvRunVpExitReasonX64Halt, WHvRunVpExitReasonX64IoPortAccess, WHvSetPartitionProperty, WHvSetVirtualProcessorRegisters, WHvSetupPartition, WHvX64RegisterCr0, WHvX64RegisterCr3, WHvX64RegisterCr4, WHvX64RegisterCs, WHvX64RegisterDs, WHvX64RegisterEfer, WHvX64RegisterGdtr, WHvX64RegisterRax, WHvX64RegisterRflags, WHvX64RegisterRip, WHvX64RegisterSs
 };
 use windows::Win32::System::Memory::{MEM_COMMIT, MEM_RESERVE, MEM_RELEASE, PAGE_READWRITE, VirtualAlloc, VirtualFree};
 
@@ -20,7 +20,8 @@ pub struct HyperVVm {
     pub guest_mem_size: usize,
     pub gdt_table: Option<GdtPointer>,
     pub page_table: Option<u64>,
-    pub stop_flag: Arc<AtomicBool>
+    pub stop_flag: Arc<AtomicBool>,
+    pub early_end_flag: Arc<AtomicBool>
 }
 
 impl Drop for HyperVVm {
@@ -90,7 +91,8 @@ impl Hypervisor for HyperVVm {
             guest_mem_size,
             gdt_table: None,
             page_table: None,
-            stop_flag: Arc::new(AtomicBool::new(false))
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            early_end_flag: Arc::new(AtomicBool::new(false))
         })
     }
 
@@ -363,6 +365,8 @@ impl Hypervisor for HyperVVm {
         if self.stop_flag.load(Ordering::Relaxed) == true {
             return ExitReason::Shutdown;
         }
+        
+        self.early_end_flag.store(true, Ordering::Relaxed);
 
         if let Err(e) = run {
             return ExitReason::Error(format!("WHvRunVirtualProcessor failed {:#?}", e));
