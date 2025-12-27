@@ -129,7 +129,8 @@ impl Hypervisor for HyperVVm {
                 limit: (gdt_size - 1) as u16,
                 base: guest_gdt_addr,
             });
-        } else if cpu_mode == CpuMode::Long {
+        }
+        else if cpu_mode == CpuMode::Long {
             let gdt_table: [GdtEntry; 3] = [
                 GdtEntry::new(0, 0, 0, 0),
                 GdtEntry::new(0, 0xFFFFF, 0x9A, 0xA),
@@ -210,7 +211,6 @@ impl Hypervisor for HyperVVm {
                 Selector: 0x08,
                 Anonymous: WHV_X64_SEGMENT_REGISTER_0 { Attributes: 0xC09B },
             },
-            // Placeholder, change later
             CpuMode::Long => WHV_X64_SEGMENT_REGISTER {
                 Base: 0,
                 Limit: 0xFFFF,

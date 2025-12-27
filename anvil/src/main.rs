@@ -3,15 +3,20 @@ mod vm;
 mod loader;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Hypervisor::WHvCancelRunVirtualProcessor;
+#[cfg(target_os = "linux")]
+use libc::pthread_kill;
+
+use clap::{Parser, Subcommand};
+use std::hash::{Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
 use dunce::canonicalize;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
-use std::thread;
+use std::{fs, thread};
 use std::time::Duration;
 use notify::RecursiveMode;
 use notify_debouncer_mini::new_debouncer;
@@ -55,6 +60,12 @@ fn main() -> Result<()> {
             run_vm(&kernel_file, memory, &tx)?;
         },
         Commands::Watch { kernel_file, memory } => {
+            #[cfg(target_os = "linux")]
+            {
+                extern "C" fn interrupt_handler(_: libc::c_int) {}
+                unsafe { libc::signal(libc::SIGUSR1, interrupt_handler as *const() as libc::sighandler_t) };
+            }
+            
             let ctrl_c = Arc::new(AtomicBool::new(false));
             let ctrl_c_clone = ctrl_c.clone();
             
@@ -95,14 +106,27 @@ fn main() -> Result<()> {
                     
                     let cancel_token = rx_token.recv().expect("VM thread died before sending cancel token");
                     
+                    let contents_init = fs::read(&kernel_file)?;
+                    let current_init = simple_hash(&contents_init);
+                    let mut last_hash = current_init;
+                    
                     loop {
                         match rx_watcher.recv_timeout(Duration::from_millis(100)) {
                             Ok(Ok(events)) => {
                                 let mut file_found = false;
                                 for event in events.iter() {
                                     if event.path == canonicalize(path)? {
-                                        file_found = true;
-                                        break;
+                                        let contents = fs::read(&kernel_file)?;
+                                        let current_hash = simple_hash(&contents);
+                                                                                
+                                        if last_hash == current_hash {
+                                            continue;
+                                        }
+                                        else {
+                                            last_hash = current_hash;
+                                            file_found = true;
+                                            break;
+                                        }
                                     }
                                 }
                                 if !file_found {
@@ -111,12 +135,7 @@ fn main() -> Result<()> {
                                 println!("\nFile changed, triggering refresh...\n");
                                 if !early_end_flag.load(Ordering::Relaxed) {
                                     stop_flag.store(true, Ordering::Relaxed);
-                                    #[cfg(target_os = "windows")]
-                                    {
-                                        if cancel_token.0 != 0 && cancel_token.0 != -1 {
-                                            unsafe { WHvCancelRunVirtualProcessor(cancel_token, 0, 0) }?;
-                                        }
-                                    }
+                                    cancel(cancel_token)?;
                                     stop_flag.store(false, Ordering::Relaxed);
                                     early_end_flag.store(false, Ordering::Relaxed);
                                 }
@@ -172,6 +191,27 @@ fn run_vm(kernel_file: &String, memory: usize, tx: &Sender<CancelToken>) -> Resu
         VmExitReason::InternalError(string) => println!("[Anvil] VM exited with a failure (Internal Error): {}", string),
         VmExitReason::Error(string) => println!("[Anvil] VM exited with a failure (Unknown): {}", string)
     };
+    
+    Ok(())
+}
+
+fn simple_hash(data: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    data.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn cancel(cancel_token: CancelToken) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        if cancel_token.0 != 0 && cancel_token.0 != -1 {
+            unsafe { WHvCancelRunVirtualProcessor(cancel_token, 0, 0) }?;
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        unsafe { pthread_kill(cancel_token, libc::SIGUSR1) };
+    }
     
     Ok(())
 }

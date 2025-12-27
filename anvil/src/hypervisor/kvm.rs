@@ -1,14 +1,17 @@
-use std::io::{self, Error};
+use std::io::{self, Error, ErrorKind};
 use std::os::fd::FromRawFd;
 use std::os::unix::io::{AsRawFd};
 use std::mem::ManuallyDrop;
 use std::fs::File;
 use std::slice::from_raw_parts;
 use std::ptr::{copy_nonoverlapping, null_mut, slice_from_raw_parts};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Sender;
 use libc::{EINTR, MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, MAP_SHARED, PROT_READ, PROT_WRITE, c_void, ioctl, mmap, munmap};
 use errno;
 
-use crate::hypervisor::{ExitReason, Hypervisor, CpuMode, GdtEntry, GdtPointer};
+use crate::hypervisor::{CancelToken, CpuMode, ExitReason, GdtEntry, GdtPointer, Hypervisor};
 
 // VM creation magic numbers
 const KVM_CREATE_VM: u64 = 0xae01;
@@ -31,13 +34,7 @@ const KVM_SET_REGS: u64 = 0x4090ae82;
 const KVM_GET_SREGS: u64 = 0x8138ae83;
 const KVM_SET_SREGS: u64 = 0x4138ae84;
 
-// SRegs bit flips (use later once I move out of real mode)
-const CR0_PE: u64 = 1 << 0;
-const CR0_PG: u64 = 1 << 31;
-const CR4_PAE: u64 = 1 << 5;
-const EFER_LME: u64 = 1 << 8;
-const EFER_LMA: u64 = 1 << 10;
-
+#[allow(unused)]
 pub struct KvmVm {
     pub kvm_handle: File,
     pub vm_handle: File,
@@ -46,7 +43,10 @@ pub struct KvmVm {
     pub guest_mem_size: usize,
     pub run_info: *mut KvmRun,
     pub run_size: usize,
-    pub gdt_table: Option<GdtPointer>
+    pub gdt_table: Option<GdtPointer>,
+    pub page_table: Option<u64>,
+    pub stop_flag: Arc<AtomicBool>,
+    pub early_end_flag: Arc<AtomicBool>
 }
 
 #[repr(C)]
@@ -266,7 +266,10 @@ impl Hypervisor for KvmVm {
             guest_mem_size: mem_size,
             run_info: kvm_run,
             run_size: run_size as usize,
-            gdt_table: None
+            gdt_table: None,
+            page_table: None,
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            early_end_flag: Arc::new(AtomicBool::new(false))
         })
     }
     
@@ -302,8 +305,71 @@ impl Hypervisor for KvmVm {
                 limit: (gdt_size - 1) as u16,
                 base: guest_gdt_addr,
             });
-        } else if cpu_mode == CpuMode::Long {
-            // Placeholder
+        }
+        else if cpu_mode == CpuMode::Long {
+            let gdt_table: [GdtEntry; 3] = [
+                GdtEntry::new(0, 0, 0, 0),
+                GdtEntry::new(0, 0xFFFFF, 0x9A, 0xA),
+                GdtEntry::new(0, 0xFFFFF, 0x92, 0xC),
+            ];
+
+            let gdt_size = size_of_val(&gdt_table);
+
+            let bytes = unsafe { from_raw_parts(gdt_table.as_ptr() as *const u8, gdt_size) };
+            let start = self.guest_mem as u64 + guest_gdt_addr;
+            unsafe { copy_nonoverlapping(bytes.as_ptr(), start as *mut u8, bytes.len()); }
+
+            self.gdt_table = Some(GdtPointer {
+                limit: (gdt_size - 1) as u16,
+                base: guest_gdt_addr,
+            });
+        }
+    }
+    
+    fn setup_pts(&mut self, memory_mb: usize, cpu_mode: CpuMode) {
+        if cpu_mode == CpuMode::Long {
+            let num_entries = memory_mb * 1024 * 1024 / 4096;
+            let num_pts = num_entries.div_ceil(512);
+            let num_pds = num_pts.div_ceil(512);
+            let num_pdpts = num_pds.div_ceil(512);
+            let num_pml4s = num_pdpts.div_ceil(512);
+            
+            let size_bytes = (num_pts + num_pds + num_pdpts + num_pml4s) * 4096;
+            let start_guest_addr = self.guest_mem_size - size_bytes;
+            let start_host_addr = self.guest_mem as usize + start_guest_addr;
+            
+            let pml4s_base_guest = start_guest_addr;
+            let pdpt_base_guest = start_guest_addr + (0x1000 * num_pml4s);
+            let pd_base_guest = pdpt_base_guest + (0x1000 * num_pdpts);
+            let pt_base_guest = pd_base_guest + (0x1000 * num_pds);
+            
+            let pml4s_base_host = start_host_addr;
+            let pdpt_base_host = start_host_addr + (0x1000 * num_pml4s);
+            let pd_base_host = pdpt_base_host + (0x1000 * num_pdpts);
+            let pt_base_host = pd_base_host + (0x1000 * num_pds);
+            
+            for i in 0..num_entries {
+                let entry_location = pt_base_host + (i * 8);
+                let entry = (i * 0x1000) | 0x03;
+                unsafe { *(entry_location as *mut u64) = entry as u64; }
+            }
+            for i in 0..num_pts {
+                let entry_location = pd_base_host + (i * 8);
+                let entry = pt_base_guest + (i * 0x1000) | 0x03;
+                unsafe { *(entry_location as *mut u64) = entry as u64; }
+            }
+            for i in 0..num_pds {
+                let entry_location = pdpt_base_host + (i * 8);
+                let entry = pd_base_guest + (i * 0x1000) | 0x03;
+                unsafe { *(entry_location as *mut u64) = entry as u64; }
+            }
+            for i in 0..num_pdpts {
+                let entry_location = pml4s_base_host + (i * 8);
+                let entry = pdpt_base_guest + (i * 0x1000) | 0x03;
+                unsafe { *(entry_location as *mut u64) = entry as u64; }
+            }
+            
+            self.page_table = Some(pml4s_base_guest as u64)
         }
     }
     
@@ -384,7 +450,62 @@ impl Hypervisor for KvmVm {
                 .limit;
             }
             CpuMode::Long => {
-                // Placeholder
+                sregs.cs.base = 0;
+                sregs.cs.selector = 0x08;
+                sregs.cs.limit = 0xFFFF;
+                sregs.cs.type_ = 0xB;
+                sregs.cs.s = 1;
+                sregs.cs.dpl = 0;
+                sregs.cs.present = 1;
+                sregs.cs.avl = 0;
+                sregs.cs.l = 1;
+                sregs.cs.db = 0;
+                sregs.cs.g = 1;
+                
+                sregs.ds.base = 0;
+                sregs.ds.selector = 0x10;
+                sregs.ds.limit = 0xFFFFFFFF;
+                sregs.ds.type_ = 0x03;
+                sregs.ds.s = 1;
+                sregs.ds.dpl = 0;
+                sregs.ds.present = 1;
+                sregs.ds.avl = 0;
+                sregs.ds.l = 0;
+                sregs.ds.db = 1;
+                sregs.ds.g = 1;
+                
+                sregs.ss.base = 0;
+                sregs.ss.selector = 0x10;
+                sregs.ss.limit = 0xFFFFFFFF;
+                sregs.ss.type_ = 0x03;
+                sregs.ss.s = 1;
+                sregs.ss.dpl = 0;
+                sregs.ss.present = 1;
+                sregs.ss.avl = 0;
+                sregs.ss.l = 0;
+                sregs.ss.db = 1;
+                sregs.ss.g = 1;
+                
+                sregs.cr3 = (self.page_table).ok_or_else(|| {
+                    Error::new(ErrorKind::Other, "Page tables not set up correctly")
+                })?;
+                sregs.cr4 = 0x20;
+                sregs.efer = 0x500;
+                sregs.cr0 = 0x80000001;
+                sregs.gdt.base = (self.gdt_table.as_ref().ok_or_else(|| {
+                    Error::new(
+                        io::ErrorKind::Other,
+                        "Base field in GDT table not set up correctly",
+                    )
+                })?)
+                .base;
+                sregs.gdt.limit = (self.gdt_table.as_ref().ok_or_else(|| {
+                    Error::new(
+                        io::ErrorKind::Other,
+                        "Limit field in GDT table not set up correctly",
+                    )
+                })?)
+                .limit;
             }
         }
         
@@ -401,7 +522,9 @@ impl Hypervisor for KvmVm {
         Ok(())
     }
     
-    fn run(&mut self) -> ExitReason {
+    fn run(&mut self, tx: &Sender<CancelToken>) -> ExitReason {
+        let thread_id = unsafe { libc::pthread_self() };
+        let _ = tx.send(thread_id);
         // This is here for weird sync issue, it fixed the register pointer issue
         let mut regs = KvmRegs::default();
         unsafe { ioctl(self.vcpu_handle.as_raw_fd(), KVM_GET_REGS, &mut regs) };
@@ -414,11 +537,17 @@ impl Hypervisor for KvmVm {
             
             let err = errno::errno().0;
             if err == EINTR {
+                if self.stop_flag.load(Ordering::Relaxed) == true {
+                    return ExitReason::Shutdown;
+                }
                 continue;
             }
             
+            self.early_end_flag.store(true, Ordering::Relaxed);
             return ExitReason::Error(format!("KVM_RUN failed: errno = {}", err));
         }
+        
+        self.early_end_flag.store(true, Ordering::Relaxed);
         
         unsafe  {
             match (*self.run_info).exit_reason as u64 {
