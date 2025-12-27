@@ -1,4 +1,7 @@
-use std::io::Result;
+use std::{io::Result, sync::mpsc::Sender};
+
+#[cfg(target_os = "windows")]
+use windows::Win32::System::Hypervisor::WHV_PARTITION_HANDLE;
 
 #[cfg(target_os = "linux")]
 mod kvm;
@@ -14,6 +17,12 @@ pub type PlatformHypervisor = hyperv::HyperVVm;
 #[cfg(target_os = "macos")]
 pub type PlatformHypervisor = hvF::HvFVm;
 
+#[cfg(target_os = "linux")]
+pub type CancelToken = libc::pthread_t;
+#[cfg(target_os = "windows")]
+pub type CancelToken = WHV_PARTITION_HANDLE;
+// Add for macOS later
+
 pub trait Hypervisor {
     fn create_vm(memory_mb: usize) -> Result<Self> where Self: Sized;
     fn load_binary(&mut self, data: &[u8], guest_addr: u64) -> Result<()>;
@@ -21,9 +30,10 @@ pub trait Hypervisor {
     fn setup_pts(&mut self, memory_mb: usize, cpu_mode: CpuMode);
     // Before releasing, make sure that GDT is loaded after binaries/elf
     fn set_entry_point(&mut self, addr: u64, cpu_mode: CpuMode) -> Result<()>;
-    fn run(&mut self) -> ExitReason;
+    fn run(&mut self, tx: &Sender<CancelToken>) -> ExitReason;
 }
 
+#[allow(unused)]
 pub enum ExitReason {
     Halt,
     IoOut { port: u16, data: Vec<u8> },

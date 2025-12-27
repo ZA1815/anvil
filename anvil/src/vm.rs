@@ -1,4 +1,7 @@
-use crate::hypervisor::{CpuMode, ExitReason, Hypervisor, PlatformHypervisor};
+use std::sync::{atomic::AtomicBool, mpsc::Sender};
+use std::sync::Arc;
+
+use crate::hypervisor::{CancelToken, CpuMode, ExitReason, Hypervisor, PlatformHypervisor};
 
 pub struct AnvilVm {
     hypervisor: PlatformHypervisor
@@ -15,10 +18,11 @@ pub enum VmExitReason {
 }
 
 impl AnvilVm {
-    pub fn create_vm(memory_mb: usize) -> anyhow::Result<Self> {
+    pub fn create_vm(memory_mb: usize) -> anyhow::Result<(Self, Arc<AtomicBool>)> {
         let hypervisor = PlatformHypervisor::create_vm(memory_mb)?;
+        let stop_flag = hypervisor.stop_flag.clone();
         
-        Ok(Self { hypervisor })
+        Ok((Self { hypervisor }, stop_flag))
     }
     
     pub fn setup_gdt(&mut self, guest_gdt_addr: u64, cpu_mode: CpuMode) {
@@ -41,9 +45,9 @@ impl AnvilVm {
         Ok(())
     }
     
-    pub fn run(&mut self) -> VmExitReason {
+    pub fn run(&mut self, tx: &Sender<CancelToken>) -> VmExitReason {
         let exit_reason = loop {
-            match self.hypervisor.run() {
+            match self.hypervisor.run(&tx) {
                 ExitReason::Halt => {
                     break VmExitReason::Halt;
                 },

@@ -7,6 +7,7 @@ pub struct LoadedKernel {
     pub cpu_mode: CpuMode
 }
 
+#[allow(unused)]
 pub struct Segment {
     pub data: Vec<u8>,
     pub guest_addr: u64,

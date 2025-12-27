@@ -4,22 +4,15 @@ use std::mem;
 use std::ptr::copy_nonoverlapping;
 use std::slice::from_raw_parts;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Sender;
 
 use windows::Win32::System::Hypervisor::{
-    WHV_PARTITION_HANDLE, WHV_REGISTER_NAME, WHV_REGISTER_VALUE, WHV_RUN_VP_EXIT_CONTEXT,
-    WHV_X64_SEGMENT_REGISTER, WHV_X64_SEGMENT_REGISTER_0, WHV_X64_TABLE_REGISTER,
-    WHvCreatePartition, WHvDeletePartition, WHvCreateVirtualProcessor, WHvDeleteVirtualProcessor, WHvMapGpaRange, WHvMapGpaRangeFlagExecute,
-    WHvMapGpaRangeFlagRead, WHvMapGpaRangeFlagWrite, WHvPartitionPropertyCodeProcessorCount,
-    WHvRunVirtualProcessor, WHvRunVpExitReasonInvalidVpRegisterValue,
-    WHvRunVpExitReasonUnrecoverableException, WHvRunVpExitReasonX64Halt,
-    WHvRunVpExitReasonX64IoPortAccess, WHvSetPartitionProperty, WHvSetVirtualProcessorRegisters,
-    WHvSetupPartition, WHvX64RegisterCr0, WHvX64RegisterCr3, WHvX64RegisterCr4, WHvX64RegisterEfer, WHvX64RegisterCs,
-    WHvX64RegisterDs, WHvX64RegisterGdtr, WHvX64RegisterRax, WHvX64RegisterRflags, WHvX64RegisterRip, WHvX64RegisterSs
+    WHV_PARTITION_HANDLE, WHV_REGISTER_NAME, WHV_REGISTER_VALUE, WHV_RUN_VP_EXIT_CONTEXT, WHV_X64_SEGMENT_REGISTER, WHV_X64_SEGMENT_REGISTER_0, WHV_X64_TABLE_REGISTER, WHvCancelRunVirtualProcessor, WHvCreatePartition, WHvCreateVirtualProcessor, WHvDeletePartition, WHvDeleteVirtualProcessor, WHvMapGpaRange, WHvMapGpaRangeFlagExecute, WHvMapGpaRangeFlagRead, WHvMapGpaRangeFlagWrite, WHvPartitionPropertyCodeProcessorCount, WHvRunVirtualProcessor, WHvRunVpExitReasonInvalidVpRegisterValue, WHvRunVpExitReasonUnrecoverableException, WHvRunVpExitReasonX64Halt, WHvRunVpExitReasonX64IoPortAccess, WHvSetPartitionProperty, WHvSetVirtualProcessorRegisters, WHvSetupPartition, WHvX64RegisterCr0, WHvX64RegisterCr3, WHvX64RegisterCr4, WHvX64RegisterCs, WHvX64RegisterDs, WHvX64RegisterEfer, WHvX64RegisterGdtr, WHvX64RegisterRax, WHvX64RegisterRflags, WHvX64RegisterRip, WHvX64RegisterSs
 };
 use windows::Win32::System::Memory::{MEM_COMMIT, MEM_RESERVE, MEM_RELEASE, PAGE_READWRITE, VirtualAlloc, VirtualFree};
 
-use crate::hypervisor::{CpuMode, ExitReason, GdtEntry, GdtPointer, Hypervisor};
+use crate::hypervisor::{CancelToken, CpuMode, ExitReason, GdtEntry, GdtPointer, Hypervisor};
 
 pub struct HyperVVm {
     pub partition: WHV_PARTITION_HANDLE,
@@ -39,6 +32,8 @@ impl Drop for HyperVVm {
         }
     }
 }
+
+unsafe impl Send for HyperVVm {}
 
 impl Hypervisor for HyperVVm {
     fn create_vm(memory_mb: usize) -> std::io::Result<Self>
@@ -94,7 +89,8 @@ impl Hypervisor for HyperVVm {
             guest_mem,
             guest_mem_size,
             gdt_table: None,
-            page_table: None
+            page_table: None,
+            stop_flag: Arc::new(AtomicBool::new(false))
         })
     }
 
@@ -298,7 +294,8 @@ impl Hypervisor for HyperVVm {
                 Pad: [0; 3],
             };
             reg_values.push(WHV_REGISTER_VALUE { Table: gdtr });
-        } else if cpu_mode == CpuMode::Long {
+        }
+        else if cpu_mode == CpuMode::Long {
             reg_keys.push(WHvX64RegisterCr3);
             reg_values.push(WHV_REGISTER_VALUE {
                 Reg64: (self.page_table).ok_or_else(|| {
@@ -349,7 +346,8 @@ impl Hypervisor for HyperVVm {
         Ok(())
     }
 
-    fn run(&mut self) -> ExitReason {
+    fn run(&mut self, tx: &Sender<CancelToken>) -> ExitReason {
+        let _ = tx.send(self.partition); // Could handle error later
         let mut exit_cx: WHV_RUN_VP_EXIT_CONTEXT = unsafe { mem::zeroed() };
         let exit_cx_size = mem::size_of::<WHV_RUN_VP_EXIT_CONTEXT>() as u32;
 
@@ -361,6 +359,10 @@ impl Hypervisor for HyperVVm {
                 exit_cx_size,
             )
         };
+        
+        if self.stop_flag.load(Ordering::Relaxed) == true {
+            return ExitReason::Shutdown;
+        }
 
         if let Err(e) = run {
             return ExitReason::Error(format!("WHvRunVirtualProcessor failed {:#?}", e));

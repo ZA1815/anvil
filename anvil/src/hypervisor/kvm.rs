@@ -187,6 +187,8 @@ impl Drop for KvmVm {
     }
 }
 
+unsafe impl Send for KvmVm {}
+
 impl Hypervisor for KvmVm {
     fn create_vm(memory_mb: usize) -> io::Result<Self> where Self: Sized {
         // Open KVM file (which tells the kernel that we want to use KVM)
