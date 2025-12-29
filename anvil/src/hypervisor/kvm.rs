@@ -18,6 +18,8 @@ const KVM_CREATE_VM: u64 = 0xae01;
 const KVM_SET_USER_MEMORY_REGION: u64 = 0x4020ae46;
 const KVM_CREATE_VCPU: u64 = 0xae41;
 const KVM_GET_VCPU_MMAP_SIZE: u64 = 0xae04;
+const KVM_GET_SUPPORTED_CPUID: u64 = 0xc008ae05;
+const KVM_SET_CPUID2: u64 = 0x4008ae90;
 
 // VM run magic numbers
 const KVM_RUN: u64 = 0xae80;
@@ -178,6 +180,26 @@ pub struct KvmSregs {
     pub interrupt_bitmap: [u64; 4]
 }
 
+#[repr(C)]
+pub struct KvmCpuid2 {
+    pub nent: u32,
+    pub padding: u32,
+    pub entries: [KvmCpuidEntry2; 256]
+}
+
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct KvmCpuidEntry2 {
+    pub function: u32,
+    pub index: u32,
+    pub flags: u32,
+    pub eax: u32,
+    pub ebx: u32,
+    pub ecx: u32,
+    pub edx: u32,
+    pub padding: [u32; 3]
+}
+
 impl Drop for KvmVm {
     fn drop(&mut self) {
         unsafe {
@@ -238,6 +260,15 @@ impl Hypervisor for KvmVm {
             panic!("create vcpu failed");
         }
         let vcpu = unsafe { File::from_raw_fd(vcpu_fd) };
+        
+        let mut cpuid_supported = KvmCpuid2 {
+            nent: 256,
+            padding: 0,
+            entries: [KvmCpuidEntry2::default(); 256]
+        };
+        
+        unsafe { ioctl(kvm_fd, KVM_GET_SUPPORTED_CPUID, &mut cpuid_supported) };
+        unsafe { ioctl(vcpu_fd, KVM_SET_CPUID2, &mut cpuid_supported) };
         
         // Use ioctl and tell KVM how large the run data will be
         let run_size = unsafe {
