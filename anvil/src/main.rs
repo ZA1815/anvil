@@ -84,8 +84,7 @@ fn main() -> Result<()> {
                     println!("[Anvil] Memory allocated: {} MB", memory);
                     
                     let (mut vm, stop_flag, early_end_flag) = AnvilVm::create_vm(memory)?;
-                    vm.setup_gdt(0x0000, kernel.cpu_mode);
-                    vm.setup_pts(memory, kernel.cpu_mode);
+                    vm.setup_reqs(memory, 0x0000, kernel.cpu_mode)?;
                     for bin in kernel.segments.iter() {
                         vm.load_binary(&bin.data, bin.guest_addr)?;
                     }
@@ -177,8 +176,7 @@ fn run_vm(kernel_file: &String, memory: usize, tx: &Sender<CancelToken>) -> Resu
     println!("[Anvil] Memory allocated: {} MB", memory);
     
     let mut vm = AnvilVm::create_vm(memory)?;
-    vm.0.setup_gdt(0x0000, kernel.cpu_mode);
-    vm.0.setup_pts(memory, kernel.cpu_mode);
+    vm.0.setup_reqs(memory, 0x0000, kernel.cpu_mode)?;
     for bin in kernel.segments.iter() {
         vm.0.load_binary(&bin.data, bin.guest_addr)?;
     }

@@ -1,5 +1,6 @@
 use std::sync::{atomic::AtomicBool, mpsc::Sender};
 use std::sync::Arc;
+use std::io::Result;
 
 use crate::hypervisor::{CancelToken, CpuMode, ExitReason, Hypervisor, PlatformHypervisor};
 
@@ -26,12 +27,12 @@ impl AnvilVm {
         Ok((Self { hypervisor }, stop_flag, early_end_flag))
     }
     
-    pub fn setup_gdt(&mut self, guest_gdt_addr: u64, cpu_mode: CpuMode) {
-        self.hypervisor.setup_gdt(guest_gdt_addr, cpu_mode);
-    }
-    
-    pub fn setup_pts(&mut self, memory_mb: usize, cpu_mode: CpuMode) {
+    pub fn setup_reqs(&mut self, memory_mb: usize, guest_gdt_addr: u64, cpu_mode: CpuMode) -> Result<()> {
         self.hypervisor.setup_pts(memory_mb, cpu_mode);
+        self.hypervisor.setup_tss(cpu_mode)?;
+        self.hypervisor.setup_gdt(guest_gdt_addr, cpu_mode);
+        
+        Ok(())
     }
     
     pub fn load_binary(&mut self, data: &[u8], guest_addr: u64) -> anyhow::Result<()> {

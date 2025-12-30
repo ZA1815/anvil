@@ -28,6 +28,7 @@ pub trait Hypervisor {
     fn load_binary(&mut self, data: &[u8], guest_addr: u64) -> Result<()>;
     fn setup_gdt(&mut self, guest_gdt_addr: u64, cpu_mode: CpuMode);
     fn setup_pts(&mut self, memory_mb: usize, cpu_mode: CpuMode);
+    fn setup_tss(&mut self, cpu_mode: CpuMode) -> Result<()>;
     // Before releasing, make sure that GDT is loaded after binaries/elf
     fn set_entry_point(&mut self, addr: u64, cpu_mode: CpuMode) -> Result<()>;
     fn run(&mut self, tx: &Sender<CancelToken>) -> ExitReason;
@@ -70,7 +71,7 @@ pub struct GdtEntry {
 }
 
 impl GdtEntry {
-    pub const fn new(base: u32, limit: u32, access: u8, flags: u8) -> Self {
+    pub const fn new(base: u64, limit: u32, access: u8, flags: u8) -> Self {
         Self {
             limit_low: (limit & 0xFFFF) as u16,
             base_low: (base & 0xFFFF) as u16,
@@ -80,4 +81,68 @@ impl GdtEntry {
             base_high: ((base >> 24) & 0xFF) as u8
         }
     }
+}
+
+// TSS structs
+#[repr(C, packed)]
+#[derive(Default)]
+pub struct Tss32 {
+    pub prev_task_link: u16,
+    pub reserved0: u16,
+    pub esp0: u32,
+    pub ss0: u16,
+    pub reserved1: u16,
+    pub esp1: u32,
+    pub ss1: u16,
+    pub reserved2: u16,
+    pub esp2: u32,
+    pub ss2: u16,
+    pub reserved3: u16,
+    pub cr3: u32,
+    pub eip: u32,
+    pub eflags: u32,
+    pub eax: u32,
+    pub ecx: u32,
+    pub edx: u32,
+    pub ebx: u32,
+    pub esp: u32,
+    pub ebp: u32,
+    pub esi: u32,
+    pub edi: u32,
+    pub es: u16,
+    pub reserved4: u16,
+    pub cs: u16,
+    pub reserved5: u16,
+    pub ss: u16,
+    pub reserved6: u16,
+    pub ds: u16,
+    pub reserved7: u16,
+    pub fs: u16,
+    pub reserved8: u16,
+    pub gs: u16,
+    pub reserved9: u16,
+    pub ldt_selector: u16,
+    pub reserved10: u16,
+    pub trap: u16,
+    pub iomap_base: u16,
+}
+
+#[repr(C, packed)]
+#[derive(Default)]
+pub struct Tss64 {
+    pub reserved0: u32,
+    pub rsp0: u64,
+    pub rsp1: u64,
+    pub rsp2: u64,
+    pub reserved1: u64,
+    pub ist1: u64,
+    pub ist2: u64,
+    pub ist3: u64,
+    pub ist4: u64,
+    pub ist5: u64,
+    pub ist6: u64,
+    pub ist7: u64,
+    pub reserved2: u64,
+    pub reserved3: u16,
+    pub iomap_base: u16,
 }

@@ -11,7 +11,7 @@ use std::sync::mpsc::Sender;
 use libc::{EINTR, MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, MAP_SHARED, PROT_READ, PROT_WRITE, c_void, ioctl, mmap, munmap};
 use errno;
 
-use crate::hypervisor::{CancelToken, CpuMode, ExitReason, GdtEntry, GdtPointer, Hypervisor};
+use crate::hypervisor::{CancelToken, CpuMode, ExitReason, GdtEntry, GdtPointer, Hypervisor, Tss32, Tss64};
 
 // VM creation magic numbers
 const KVM_CREATE_VM: u64 = 0xae01;
@@ -47,6 +47,7 @@ pub struct KvmVm {
     pub run_size: usize,
     pub gdt_table: Option<GdtPointer>,
     pub page_table: Option<u64>,
+    pub tss_structure: Option<u64>,
     pub stop_flag: Arc<AtomicBool>,
     pub early_end_flag: Arc<AtomicBool>
 }
@@ -267,8 +268,14 @@ impl Hypervisor for KvmVm {
             entries: [KvmCpuidEntry2::default(); 256]
         };
         
-        unsafe { ioctl(kvm_fd, KVM_GET_SUPPORTED_CPUID, &mut cpuid_supported) };
-        unsafe { ioctl(vcpu_fd, KVM_SET_CPUID2, &mut cpuid_supported) };
+        let sup = unsafe { ioctl(kvm_fd, KVM_GET_SUPPORTED_CPUID, &mut cpuid_supported) };
+        if sup == -1 {
+            println!("GET_SUPPORTED_CPUID failed: {}", std::io::Error::last_os_error());
+        }
+        let set = unsafe { ioctl(vcpu_fd, KVM_SET_CPUID2, &mut cpuid_supported) };
+        if set == -1 {
+            println!("GET_SET_CPUID2 failed: {}", std::io::Error::last_os_error());
+        }
         
         // Use ioctl and tell KVM how large the run data will be
         let run_size = unsafe {
@@ -299,6 +306,7 @@ impl Hypervisor for KvmVm {
             run_size: run_size as usize,
             gdt_table: None,
             page_table: None,
+            tss_structure: None,
             stop_flag: Arc::new(AtomicBool::new(false)),
             early_end_flag: Arc::new(AtomicBool::new(false))
         })
@@ -320,10 +328,11 @@ impl Hypervisor for KvmVm {
     
     fn setup_gdt(&mut self, guest_gdt_addr: u64, cpu_mode: CpuMode) {
         if cpu_mode == CpuMode::Protected {
-            let gdt_table: [GdtEntry; 3] = [
+            let gdt_table: [GdtEntry; 4] = [
                 GdtEntry::new(0, 0, 0, 0),
                 GdtEntry::new(0, 0xFFFFF, 0x9A, 0xC),
                 GdtEntry::new(0, 0xFFFFF, 0x92, 0xC),
+                GdtEntry::new(self.tss_structure.unwrap(), 0x67, 0x89, 0x0)
             ];
 
             let gdt_size = size_of_val(&gdt_table);
@@ -338,20 +347,26 @@ impl Hypervisor for KvmVm {
             });
         }
         else if cpu_mode == CpuMode::Long {
-            let gdt_table: [GdtEntry; 3] = [
+            let gdt_table: [GdtEntry; 4] = [
                 GdtEntry::new(0, 0, 0, 0),
                 GdtEntry::new(0, 0xFFFFF, 0x9A, 0xA),
                 GdtEntry::new(0, 0xFFFFF, 0x92, 0xC),
+                GdtEntry::new(self.tss_structure.unwrap(), 0x67, 0x89, 0x0),
             ];
-
+            
+            let tss_upper = (self.tss_structure.unwrap() >> 32).to_le_bytes();
             let gdt_size = size_of_val(&gdt_table);
 
             let bytes = unsafe { from_raw_parts(gdt_table.as_ptr() as *const u8, gdt_size) };
             let start = self.guest_mem as u64 + guest_gdt_addr;
             unsafe { copy_nonoverlapping(bytes.as_ptr(), start as *mut u8, bytes.len()); }
+            let end_gdt = start + bytes.len() as u64;
+            unsafe { copy_nonoverlapping(tss_upper.as_ptr(), end_gdt as *mut u8, 8); }
+            
+            let final_gdt_size = gdt_size + size_of::<u64>();
 
             self.gdt_table = Some(GdtPointer {
-                limit: (gdt_size - 1) as u16,
+                limit: (final_gdt_size - 1) as u16,
                 base: guest_gdt_addr,
             });
         }
@@ -402,6 +417,35 @@ impl Hypervisor for KvmVm {
             
             self.page_table = Some(pml4s_base_guest as u64)
         }
+    }
+    
+    fn setup_tss(&mut self, cpu_mode: CpuMode) -> io::Result<()> {
+        if cpu_mode == CpuMode::Protected {
+            let mut tss = Tss32::default();
+            let tss_size = size_of_val(&tss);
+            let stack_addr = self.guest_mem_size - tss_size; // Handle conversion into u32 with try_into later
+            tss.esp0 = stack_addr as u32;
+            tss.ss0 = 0x10;
+            
+            let bytes = unsafe { from_raw_parts(&tss as *const Tss32 as *const u8, tss_size) };
+            let start = self.guest_mem as usize + stack_addr;
+            unsafe { copy_nonoverlapping(bytes.as_ptr(), start as *mut u8, bytes.len()) };
+            self.tss_structure = Some(stack_addr as u64);
+        }
+        else if cpu_mode == CpuMode::Long {
+            let mut tss = Tss64::default();
+            let tss_size = size_of_val(&tss);
+            let stack_addr = self.page_table.unwrap() - tss_size as u64; // Also doubles as the tss_addr
+            tss.rsp0 = stack_addr;
+            
+            let tss_size = size_of_val(&tss);
+            let bytes = unsafe { from_raw_parts(&tss as *const Tss64 as *const u8, tss_size) };
+            let start = self.guest_mem as u64 + stack_addr;
+            unsafe { copy_nonoverlapping(bytes.as_ptr(), start as *mut u8, bytes.len()) };
+            self.tss_structure = Some(stack_addr);
+        };
+        
+        Ok(())
     }
     
     fn set_entry_point(&mut self, addr: u64, cpu_mode: CpuMode) -> io::Result<()> {
@@ -465,6 +509,18 @@ impl Hypervisor for KvmVm {
                 
                 sregs.cr0 = 0x11;
                 
+                sregs.tr.base = self.tss_structure.ok_or_else(|| Error::new(ErrorKind::Other, "TSS not set up correctly"))?;
+                sregs.tr.selector = 0x18;
+                sregs.tr.limit = 0x67;
+                sregs.tr.type_ = 0xB;
+                sregs.tr.s = 0;
+                sregs.tr.dpl = 0;
+                sregs.tr.present = 1;
+                sregs.tr.avl = 0;
+                sregs.tr.l = 0;
+                sregs.tr.db = 0;
+                sregs.tr.g = 0;
+                
                 sregs.gdt.base = (self.gdt_table.as_ref().ok_or_else(|| {
                     Error::new(
                         io::ErrorKind::Other,
@@ -516,6 +572,18 @@ impl Hypervisor for KvmVm {
                 sregs.ss.l = 0;
                 sregs.ss.db = 1;
                 sregs.ss.g = 1;
+                
+                sregs.tr.base = self.tss_structure.ok_or_else(|| Error::new(ErrorKind::Other, "TSS not set up correctly"))?;
+                sregs.tr.selector = 0x18;
+                sregs.tr.limit = 0x67;
+                sregs.tr.type_ = 0xB;
+                sregs.tr.s = 0;
+                sregs.tr.dpl = 0;
+                sregs.tr.present = 1;
+                sregs.tr.avl = 0;
+                sregs.tr.l = 0;
+                sregs.tr.db = 0;
+                sregs.tr.g = 0;
                 
                 sregs.cr3 = (self.page_table).ok_or_else(|| {
                     Error::new(ErrorKind::Other, "Page tables not set up correctly")
