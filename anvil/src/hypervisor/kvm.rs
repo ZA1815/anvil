@@ -11,7 +11,7 @@ use std::sync::mpsc::Sender;
 use libc::{EINTR, MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, MAP_SHARED, PROT_READ, PROT_WRITE, c_void, ioctl, mmap, munmap};
 use errno;
 
-use crate::hypervisor::{CancelToken, CpuMode, ExitReason, GdtEntry, GdtPointer, Hypervisor, Tss32, Tss64};
+use crate::hypervisor::{CancelToken, CpuMode, ExitReason, GdtEntry, GdtPointer, GuestInfo, Hypervisor, Register, Tss32, Tss64};
 
 // VM creation magic numbers
 const KVM_CREATE_VM: u64 = 0xae01;
@@ -448,7 +448,7 @@ impl Hypervisor for KvmVm {
         Ok(())
     }
     
-    fn set_entry_point(&mut self, addr: u64, cpu_mode: CpuMode) -> io::Result<()> {
+    fn set_entry_point(&mut self, exec_addr: u64, guest_info: Option<GuestInfo>, cpu_mode: CpuMode) -> io::Result<()> {
         let mut regs = KvmRegs::default();
         let mut sregs = KvmSregs::default();
         
@@ -462,7 +462,7 @@ impl Hypervisor for KvmVm {
             return Err(Error::last_os_error());
         }
         
-        regs.rip = addr;
+        regs.rip = exec_addr;
         regs.rflags = 0x2;
         match cpu_mode {
             CpuMode::Real => {
@@ -606,6 +606,29 @@ impl Hypervisor for KvmVm {
                 })?)
                 .limit;
             }
+        }
+        
+        match guest_info {
+            Some(info) => {
+                match info.load_reg {
+                    Register::Rax => regs.rax = info.guest_addr,
+                    Register::Rcx => regs.rcx = info.guest_addr,
+                    Register::Rdx => regs.rdx = info.guest_addr,
+                    Register::Rbx => regs.rbx = info.guest_addr,
+                    Register::Rbp => regs.rbp = info.guest_addr,
+                    Register::Rsi => regs.rsi = info.guest_addr,
+                    Register::Rdi => regs.rdi = info.guest_addr,
+                    Register::R8 => regs.r8 = info.guest_addr,
+                    Register::R9 => regs.r9 = info.guest_addr,
+                    Register::R10 => regs.r10 = info.guest_addr,
+                    Register::R11 => regs.r11 = info.guest_addr,
+                    Register::R12 => regs.r12 = info.guest_addr,
+                    Register::R13 => regs.r13 = info.guest_addr,
+                    Register::R14 => regs.r14 = info.guest_addr,
+                    Register::R15 => regs.r15 = info.guest_addr
+                }
+            }
+            None => ()
         }
         
         let set_regs = unsafe { ioctl(self.vcpu_handle.as_raw_fd(), KVM_SET_REGS, &regs) };

@@ -2,7 +2,7 @@ use std::sync::{atomic::AtomicBool, mpsc::Sender};
 use std::sync::Arc;
 use std::io::Result;
 
-use crate::hypervisor::{CancelToken, CpuMode, ExitReason, Hypervisor, PlatformHypervisor};
+use crate::hypervisor::{CancelToken, CpuMode, ExitReason, GuestInfo, Hypervisor, PlatformHypervisor};
 
 pub struct AnvilVm {
     hypervisor: PlatformHypervisor
@@ -41,8 +41,8 @@ impl AnvilVm {
         Ok(())
     }
     
-    pub fn set_entry_point(&mut self, addr: u64, cpu_mode: CpuMode) -> anyhow::Result<()> {
-        self.hypervisor.set_entry_point(addr, cpu_mode)?;
+    pub fn set_entry_point(&mut self, exec_addr: u64, guest_info: Option<GuestInfo>, cpu_mode: CpuMode) -> anyhow::Result<()> {
+        self.hypervisor.set_entry_point(exec_addr, guest_info, cpu_mode)?;
         
         Ok(())
     }

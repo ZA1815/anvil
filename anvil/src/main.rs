@@ -22,9 +22,9 @@ use notify::RecursiveMode;
 use notify_debouncer_mini::new_debouncer;
 use ctrlc;
 
-use crate::hypervisor::CancelToken;
+use crate::hypervisor::{CancelToken, GuestInfo, Register};
 use crate::vm::{AnvilVm, VmExitReason};
-use crate::loader::parse_kernel;
+use crate::loader::{LoadedKernel, parse_kernel};
 
 #[derive(Parser)]
 #[command(name = "Anvil")]
@@ -37,17 +37,30 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    // Add multiple load args later
     Run {
         kernel_file: String,
         
         #[arg(short, long, default_value = "16")]
-        memory: usize
+        memory: usize,
+        
+        #[arg(short, long)]
+        load: Option<String>,
+        
+        #[arg(long, value_enum, default_value = "RDI", requires = "load")]
+        load_reg: Register
     },
     Watch {
         kernel_file: String,
         
         #[arg(short, long, default_value = "16")]
-        memory: usize
+        memory: usize,
+        
+        #[arg(short, long)]
+        load: Option<String>,
+        
+        #[arg(long, value_enum, default_value = "RDI", requires = "load")]
+        load_reg: Register
     }
 }
 
@@ -55,11 +68,20 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     
     match cli.command {
-        Commands::Run { kernel_file, memory } => {
+        Commands::Run { kernel_file, memory, load, load_reg } => {
             let (tx, ..) = channel::<CancelToken>();
-            run_vm(&kernel_file, memory, &tx)?;
+            match load {
+                Some (ref path) => {
+                    let guest_file = parse_kernel(path)?;
+                    let guest_info = GuestInfo { guest_addr: guest_file.entry_point, load_reg };
+                    run_vm(&kernel_file, memory, Some(guest_file), Some(guest_info), &tx)?;
+                }
+                None => {
+                    run_vm(&kernel_file, memory, None, None, &tx)?;
+                }
+            }
         },
-        Commands::Watch { kernel_file, memory } => {
+        Commands::Watch { kernel_file, memory, load, load_reg } => {
             #[cfg(target_os = "linux")]
             {
                 extern "C" fn interrupt_handler(_: libc::c_int) {}
@@ -88,7 +110,22 @@ fn main() -> Result<()> {
                     for bin in kernel.segments.iter() {
                         vm.load_binary(&bin.data, bin.guest_addr)?;
                     }
-                    vm.set_entry_point(kernel.entry_point, kernel.cpu_mode)?;
+                    match load {
+                        Some(ref path) => {
+                            let guest = parse_kernel(path)?;
+                            for bin in guest.segments.iter() {
+                                vm.load_binary(&bin.data, bin.guest_addr)?;
+                            }
+                            vm.set_entry_point(
+                                kernel.entry_point,
+                                Some(GuestInfo { guest_addr: guest.entry_point, load_reg }),
+                                kernel.cpu_mode
+                            )?;
+                        }
+                        None => {
+                            vm.set_entry_point(kernel.entry_point, None, kernel.cpu_mode)?;
+                        }
+                    }
                     
                     let (tx_token, rx_token) = channel::<CancelToken>();
                     
@@ -169,7 +206,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn run_vm(kernel_file: &String, memory: usize, tx: &Sender<CancelToken>) -> Result<()> {
+fn run_vm(kernel_file: &String, memory: usize, guest_file: Option<LoadedKernel>, guest_info: Option<GuestInfo>, tx: &Sender<CancelToken>) -> Result<()> {
     let kernel = parse_kernel(&kernel_file)?;
     
     println!("[Anvil] Loading kernel: {} ({} bytes)", &kernel_file, kernel.segments.iter().map(|segment| segment.data.len()).sum::<usize>());
@@ -180,7 +217,15 @@ fn run_vm(kernel_file: &String, memory: usize, tx: &Sender<CancelToken>) -> Resu
     for bin in kernel.segments.iter() {
         vm.0.load_binary(&bin.data, bin.guest_addr)?;
     }
-    vm.0.set_entry_point(kernel.entry_point, kernel.cpu_mode)?;
+    match guest_file {
+        Some(kernel) => {
+            for bin in kernel.segments.iter() {
+                vm.0.load_binary(&bin.data, bin.guest_addr)?;
+            }
+        }
+        None => ()
+    }
+    vm.0.set_entry_point(kernel.entry_point, guest_info, kernel.cpu_mode)?;
     let exit_reason = vm.0.run(&tx);
     match exit_reason {
         VmExitReason::Halt => println!("[Anvil] VM exited successfully (Halt)"),

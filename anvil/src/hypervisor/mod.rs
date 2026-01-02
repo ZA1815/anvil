@@ -1,4 +1,5 @@
 use std::{io::Result, sync::mpsc::Sender};
+use clap::ValueEnum;
 
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Hypervisor::WHV_PARTITION_HANDLE;
@@ -30,7 +31,7 @@ pub trait Hypervisor {
     fn setup_pts(&mut self, memory_mb: usize, cpu_mode: CpuMode);
     fn setup_tss(&mut self, cpu_mode: CpuMode) -> Result<()>;
     // Before releasing, make sure that GDT is loaded after binaries/elf
-    fn set_entry_point(&mut self, addr: u64, cpu_mode: CpuMode) -> Result<()>;
+    fn set_entry_point(&mut self, exec_addr: u64, guest_info: Option<GuestInfo>, cpu_mode: CpuMode) -> Result<()>;
     fn run(&mut self, tx: &Sender<CancelToken>) -> ExitReason;
 }
 
@@ -51,6 +52,30 @@ pub enum CpuMode {
     Real,
     Protected,
     Long
+}
+
+#[derive(ValueEnum, Copy, Clone)]
+pub enum Register {
+    Rax,
+    Rcx,
+    Rdx,
+    Rbx,
+    Rbp,
+    Rsi,
+    Rdi,
+    R8,
+    R9,
+    R10,
+    R11,
+    R12,
+    R13,
+    R14,
+    R15
+}
+
+pub struct GuestInfo {
+    pub guest_addr: u64,
+    pub load_reg: Register
 }
 
 // GDT logic to enter 32-bit protected mode
