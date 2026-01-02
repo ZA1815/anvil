@@ -54,7 +54,7 @@ pub enum CpuMode {
     Long
 }
 
-#[derive(ValueEnum, Copy, Clone)]
+#[derive(ValueEnum, Copy, Clone, Debug)]
 pub enum Register {
     Rax,
     Rcx,

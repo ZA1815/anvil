@@ -47,8 +47,8 @@ enum Commands {
         #[arg(short, long)]
         load: Option<String>,
         
-        #[arg(long, value_enum, default_value = "RDI", requires = "load")]
-        load_reg: Register
+        #[arg(long, value_enum, default_value = "rdi", requires = "load")]
+        load_reg: Option<Register>
     },
     Watch {
         kernel_file: String,
@@ -59,8 +59,8 @@ enum Commands {
         #[arg(short, long)]
         load: Option<String>,
         
-        #[arg(long, value_enum, default_value = "RDI", requires = "load")]
-        load_reg: Register
+        #[arg(long, value_enum, default_value = "rdi", requires = "load")]
+        load_reg: Option<Register>
     }
 }
 
@@ -72,12 +72,12 @@ fn main() -> Result<()> {
             let (tx, ..) = channel::<CancelToken>();
             match load {
                 Some (ref path) => {
-                    let guest_file = parse_kernel(path)?;
-                    let guest_info = GuestInfo { guest_addr: guest_file.entry_point, load_reg };
-                    run_vm(&kernel_file, memory, Some(guest_file), Some(guest_info), &tx)?;
+                    let guest_kernel = parse_kernel(path)?;
+                    let guest_info = GuestInfo { guest_addr: guest_kernel.entry_point, load_reg: load_reg.unwrap() };
+                    run_vm(&kernel_file, memory, Some(path), Some(guest_kernel), Some(guest_info), &tx)?;
                 }
                 None => {
-                    run_vm(&kernel_file, memory, None, None, &tx)?;
+                    run_vm(&kernel_file, memory, None, None, None, &tx)?;
                 }
             }
         },
@@ -103,7 +103,6 @@ fn main() -> Result<()> {
                     let kernel = parse_kernel(&kernel_file)?;
                     
                     println!("[Anvil] Loading kernel: {} ({} bytes)", &kernel_file, kernel.segments.iter().map(|segment| segment.data.len()).sum::<usize>());
-                    println!("[Anvil] Memory allocated: {} MB", memory);
                     
                     let (mut vm, stop_flag, early_end_flag) = AnvilVm::create_vm(memory)?;
                     vm.setup_reqs(memory, 0x0000, kernel.cpu_mode)?;
@@ -118,14 +117,16 @@ fn main() -> Result<()> {
                             }
                             vm.set_entry_point(
                                 kernel.entry_point,
-                                Some(GuestInfo { guest_addr: guest.entry_point, load_reg }),
+                                Some(GuestInfo { guest_addr: guest.entry_point, load_reg: load_reg.unwrap() }),
                                 kernel.cpu_mode
                             )?;
+                            println!("[Anvil] Loading guest: {} ({} bytes) -> {:#?}", path, guest.segments.iter().map(|segment| segment.data.len()).sum::<usize>(), load_reg.unwrap());
                         }
                         None => {
                             vm.set_entry_point(kernel.entry_point, None, kernel.cpu_mode)?;
                         }
                     }
+                    println!("[Anvil] Memory allocated: {} MB", memory);
                     
                     let (tx_token, rx_token) = channel::<CancelToken>();
                     
@@ -206,25 +207,28 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn run_vm(kernel_file: &String, memory: usize, guest_file: Option<LoadedKernel>, guest_info: Option<GuestInfo>, tx: &Sender<CancelToken>) -> Result<()> {
+fn run_vm(kernel_file: &String, memory: usize, guest_file: Option<&String>, guest_kernel: Option<LoadedKernel>, guest_info: Option<GuestInfo>, tx: &Sender<CancelToken>) -> Result<()> {
     let kernel = parse_kernel(&kernel_file)?;
     
     println!("[Anvil] Loading kernel: {} ({} bytes)", &kernel_file, kernel.segments.iter().map(|segment| segment.data.len()).sum::<usize>());
-    println!("[Anvil] Memory allocated: {} MB", memory);
     
     let mut vm = AnvilVm::create_vm(memory)?;
     vm.0.setup_reqs(memory, 0x0000, kernel.cpu_mode)?;
     for bin in kernel.segments.iter() {
         vm.0.load_binary(&bin.data, bin.guest_addr)?;
     }
-    match guest_file {
+    match guest_kernel {
         Some(kernel) => {
+            println!("[Anvil] Loading guest: {} ({} bytes) -> {:#?}", guest_file.unwrap(), kernel.segments.iter().map(|segment| segment.data.len()).sum::<usize>(), guest_info.as_ref().unwrap().load_reg);
             for bin in kernel.segments.iter() {
                 vm.0.load_binary(&bin.data, bin.guest_addr)?;
             }
         }
         None => ()
     }
+    
+    println!("[Anvil] Memory allocated: {} MB", memory);
+    
     vm.0.set_entry_point(kernel.entry_point, guest_info, kernel.cpu_mode)?;
     let exit_reason = vm.0.run(&tx);
     match exit_reason {
