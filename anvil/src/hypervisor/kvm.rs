@@ -448,7 +448,7 @@ impl Hypervisor for KvmVm {
         Ok(())
     }
     
-    fn set_entry_point(&mut self, exec_addr: u64, guest_info: Option<GuestInfo>, cpu_mode: CpuMode) -> io::Result<()> {
+    fn set_entry_point(&mut self, mem_reg: Register, exec_addr: u64, guest_info: Option<GuestInfo>, cpu_mode: CpuMode) -> io::Result<()> {
         let mut regs = KvmRegs::default();
         let mut sregs = KvmSregs::default();
         
@@ -606,6 +606,24 @@ impl Hypervisor for KvmVm {
                 })?)
                 .limit;
             }
+        }
+        
+        match mem_reg {
+            Register::Rax => regs.rax = self.guest_mem_size as u64,
+            Register::Rcx => regs.rcx = self.guest_mem_size as u64,
+            Register::Rdx => regs.rdx = self.guest_mem_size as u64,
+            Register::Rbx => regs.rbx = self.guest_mem_size as u64,
+            Register::Rbp => regs.rbp = self.guest_mem_size as u64,
+            Register::Rsi => regs.rsi = self.guest_mem_size as u64,
+            Register::Rdi => regs.rdi = self.guest_mem_size as u64,
+            Register::R8 => regs.r8 = self.guest_mem_size as u64, 
+            Register::R9 => regs.r9 = self.guest_mem_size as u64, 
+            Register::R10 => regs.r10 = self.guest_mem_size as u64,
+            Register::R11 => regs.r11 = self.guest_mem_size as u64,
+            Register::R12 => regs.r12 = self.guest_mem_size as u64,
+            Register::R13 => regs.r13 = self.guest_mem_size as u64,
+            Register::R14 => regs.r14 = self.guest_mem_size as u64,
+            Register::R15 => regs.r15 = self.guest_mem_size as u64
         }
         
         match guest_info {

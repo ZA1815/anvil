@@ -16,3 +16,4 @@ Cargo.lock
 *.elf
 *.ld
 *.s
+*.o

@@ -31,7 +31,7 @@ pub trait Hypervisor {
     fn setup_pts(&mut self, memory_mb: usize, cpu_mode: CpuMode);
     fn setup_tss(&mut self, cpu_mode: CpuMode) -> Result<()>;
     // Before releasing, make sure that GDT is loaded after binaries/elf
-    fn set_entry_point(&mut self, exec_addr: u64, guest_info: Option<GuestInfo>, cpu_mode: CpuMode) -> Result<()>;
+    fn set_entry_point(&mut self, mem_reg: Register, exec_addr: u64, guest_info: Option<GuestInfo>, cpu_mode: CpuMode) -> Result<()>;
     fn run(&mut self, tx: &Sender<CancelToken>) -> ExitReason;
 }
 
