@@ -48,6 +48,8 @@ pub struct KvmVm {
     pub gdt_table: Option<GdtPointer>,
     pub page_table: Option<u64>,
     pub tss_structure: Option<u64>,
+    // Set this up for 16-bit later too (so its not an Option type)
+    pub stack_addr: Option<u64>,
     pub stop_flag: Arc<AtomicBool>,
     pub early_end_flag: Arc<AtomicBool>
 }
@@ -307,6 +309,7 @@ impl Hypervisor for KvmVm {
             gdt_table: None,
             page_table: None,
             tss_structure: None,
+            stack_addr: None,
             stop_flag: Arc::new(AtomicBool::new(false)),
             early_end_flag: Arc::new(AtomicBool::new(false))
         })
@@ -426,6 +429,7 @@ impl Hypervisor for KvmVm {
             let stack_addr = self.guest_mem_size - tss_size; // Handle conversion into u32 with try_into later
             tss.esp0 = stack_addr as u32;
             tss.ss0 = 0x10;
+            self.stack_addr = Some(stack_addr as u64);
             
             let bytes = unsafe { from_raw_parts(&tss as *const Tss32 as *const u8, tss_size) };
             let start = self.guest_mem as usize + stack_addr;
@@ -437,6 +441,7 @@ impl Hypervisor for KvmVm {
             let tss_size = size_of_val(&tss);
             let stack_addr = self.page_table.unwrap() - tss_size as u64; // Also doubles as the tss_addr
             tss.rsp0 = stack_addr;
+            self.stack_addr = Some(stack_addr);
             
             let tss_size = size_of_val(&tss);
             let bytes = unsafe { from_raw_parts(&tss as *const Tss64 as *const u8, tss_size) };
@@ -471,6 +476,9 @@ impl Hypervisor for KvmVm {
                 sregs.cs.limit = 0xFFFF;
             }
             CpuMode::Protected => {
+                // Unsafe, fix later
+                regs.rsp = self.stack_addr.unwrap();
+                
                 sregs.cs.base = 0;
                 sregs.cs.selector = 0x08;
                 sregs.cs.limit = 0xFFFFFFFF;
@@ -537,6 +545,9 @@ impl Hypervisor for KvmVm {
                 .limit;
             }
             CpuMode::Long => {
+                // Unsafe, fix later
+                regs.rsp = self.stack_addr.unwrap();
+                
                 sregs.cs.base = 0;
                 sregs.cs.selector = 0x08;
                 sregs.cs.limit = 0xFFFF;
