@@ -44,13 +44,13 @@ enum Commands {
         #[arg(short, long, default_value = "16")]
         memory: usize,
         
-        #[arg(long, default_value = "rsi")]
+        #[arg(long, default_value = "rdi")]
         mem_reg: Register,
         
         #[arg(short, long)]
         load: Option<String>,
         
-        #[arg(long, value_enum, default_value = "rdi", requires = "load")]
+        #[arg(long, value_enum, default_value = "rsi", requires = "load")]
         load_reg: Option<Register>
     },
     Watch {
@@ -59,13 +59,13 @@ enum Commands {
         #[arg(short, long, default_value = "16")]
         memory: usize,
         
-        #[arg(short, long, default_value = "rsi")]
+        #[arg(short, long, default_value = "rdi")]
         mem_reg: Register,
         
         #[arg(short, long)]
         load: Option<String>,
         
-        #[arg(long, value_enum, default_value = "rdi", requires = "load")]
+        #[arg(long, value_enum, default_value = "rsi", requires = "load")]
         load_reg: Option<Register>
     }
 }
