@@ -1,4 +1,4 @@
-use std::{fs::read, io::{self, Error}, path::Path};
+use std::{fs::read, io::{self, Error, stdin, Read}, path::Path};
 use crate::hypervisor::CpuMode;
 
 pub struct LoadedKernel {
@@ -14,8 +14,15 @@ pub struct Segment {
     pub mem_size: u64
 }
 
-pub fn parse_kernel<P: AsRef<Path>>(path: P) -> io::Result<LoadedKernel> {
-    let kernel = read(path)?;
+pub fn parse_kernel<P: AsRef<Path>>(path: Option<P>) -> io::Result<LoadedKernel> {
+    let kernel = match path {
+        Some(p) => read(p)?,
+        None => {
+            let mut buffer = Vec::new();
+            stdin().read_to_end(&mut buffer)?;
+            buffer
+        }
+    };
     
     if kernel[0..4] == [0x7f, b'E', b'L', b'F'] {
         // ELF validity check

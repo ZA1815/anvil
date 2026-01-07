@@ -8,11 +8,11 @@ use windows::Win32::System::Hypervisor::WHvCancelRunVirtualProcessor;
 #[cfg(target_os = "linux")]
 use libc::pthread_kill;
 
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand};
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 use dunce::canonicalize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
@@ -30,6 +30,7 @@ use crate::loader::{LoadedKernel, parse_kernel};
 #[command(name = "Anvil")]
 #[command(about = "Disposable VM for testing bare-metal code", long_about = None)]
 #[command(version)]
+#[command(group(ArgGroup::new("load").args(["load_path", "load_bytes"]).multiple(false)))]
 struct Cli {
     #[command(subcommand)]
     command: Commands
@@ -48,7 +49,10 @@ enum Commands {
         mem_reg: Register,
         
         #[arg(short, long)]
-        load: Option<String>,
+        load_path: Option<String>,
+        
+        #[arg(short, long)]
+        load_bytes: bool,
         
         #[arg(long, value_enum, default_value = "rsi", requires = "load")]
         load_reg: Option<Register>
@@ -63,7 +67,10 @@ enum Commands {
         mem_reg: Register,
         
         #[arg(short, long)]
-        load: Option<String>,
+        load_path: Option<String>,
+        
+        #[arg(short, long)]
+        load_bytes: bool,
         
         #[arg(long, value_enum, default_value = "rsi", requires = "load")]
         load_reg: Option<Register>
@@ -74,20 +81,27 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     
     match cli.command {
-        Commands::Run { kernel_file, memory, mem_reg, load, load_reg } => {
+        Commands::Run { kernel_file, memory, mem_reg, load_path, load_bytes, load_reg } => {
             let (tx, ..) = channel::<CancelToken>();
-            match load {
+            match load_path {
                 Some (ref path) => {
-                    let guest_kernel = parse_kernel(path)?;
+                    let guest_kernel = parse_kernel(Some(path))?;
                     let guest_info = GuestInfo { guest_addr: guest_kernel.entry_point, load_reg: load_reg.unwrap() };
                     run_vm(&kernel_file, memory, mem_reg, Some(path), Some(guest_kernel), Some(guest_info), &tx)?;
                 }
                 None => {
-                    run_vm(&kernel_file, memory, mem_reg, None, None, None, &tx)?;
+                    if load_bytes {
+                        let guest_kernel = parse_kernel::<PathBuf>(None)?;
+                        let guest_info = GuestInfo { guest_addr: guest_kernel.entry_point, load_reg: load_reg.unwrap() };
+                        run_vm(&kernel_file, memory, mem_reg, None, Some(guest_kernel), Some(guest_info), &tx)?;
+                    }
+                    else {
+                        run_vm(&kernel_file, memory, mem_reg, None, None, None, &tx)?;
+                    }
                 }
             }
         },
-        Commands::Watch { kernel_file, memory, mem_reg, load, load_reg } => {
+        Commands::Watch { kernel_file, memory, mem_reg, load_path, load_bytes, load_reg } => {
             #[cfg(target_os = "linux")]
             {
                 extern "C" fn interrupt_handler(_: libc::c_int) {}
@@ -105,32 +119,51 @@ fn main() -> Result<()> {
                 let parent = path.parent().unwrap_or(Path::new("."));
                 debouncer.watcher().watch(parent, RecursiveMode::NonRecursive).expect("Failed to watch parent directory");
                 
+                let mut guest = None;
+                if load_bytes {
+                    guest = Some(parse_kernel::<PathBuf>(None)?);
+                }
+                
                 'outer: loop {
-                    let kernel = parse_kernel(&kernel_file)?;
+                    let kernel = parse_kernel(Some(&kernel_file))?;
                     
                     println!("[Anvil] Loading kernel: {} ({} bytes)", &kernel_file, kernel.segments.iter().map(|segment| segment.data.len()).sum::<usize>());
                     
                     let (mut vm, stop_flag, early_end_flag) = AnvilVm::create_vm(memory)?;
                     vm.setup_reqs(memory, 0x0000, kernel.cpu_mode)?;
                     for bin in kernel.segments.iter() {
-                        vm.load_binary(&bin.data, bin.guest_addr)?;
+                         vm.load_binary(&bin.data, bin.guest_addr)?;
                     }
-                    match load {
+                    match load_path {
                         Some(ref path) => {
-                            let guest = parse_kernel(path)?;
-                            for bin in guest.segments.iter() {
+                            guest = Some(parse_kernel(Some(path))?);
+                            for bin in guest.as_ref().unwrap().segments.iter() {
                                 vm.load_binary(&bin.data, bin.guest_addr)?;
+                                }
+                                vm.set_entry_point(
+                                    mem_reg,
+                                    kernel.entry_point,
+                                    Some(GuestInfo { guest_addr: guest.as_ref().unwrap().entry_point, load_reg: load_reg.unwrap() }),
+                                    kernel.cpu_mode
+                                )?;
+                                println!("[Anvil] Loading guest: {} ({} bytes) -> {:#?}", path, guest.as_ref().unwrap().segments.iter().map(|segment| segment.data.len()).sum::<usize>(), load_reg.unwrap());
                             }
-                            vm.set_entry_point(
-                                mem_reg,
-                                kernel.entry_point,
-                                Some(GuestInfo { guest_addr: guest.entry_point, load_reg: load_reg.unwrap() }),
-                                kernel.cpu_mode
-                            )?;
-                            println!("[Anvil] Loading guest: {} ({} bytes) -> {:#?}", path, guest.segments.iter().map(|segment| segment.data.len()).sum::<usize>(), load_reg.unwrap());
-                        }
                         None => {
-                            vm.set_entry_point(mem_reg, kernel.entry_point, None, kernel.cpu_mode)?;
+                            if load_bytes {
+                                for bin in guest.as_ref().unwrap().segments.iter() {
+                                    vm.load_binary(&bin.data, bin.guest_addr)?;
+                                }
+                                vm.set_entry_point(
+                                    mem_reg,
+                                    kernel.entry_point,
+                                    Some(GuestInfo { guest_addr: guest.as_ref().unwrap().entry_point, load_reg: load_reg.unwrap() }),
+                                    kernel.cpu_mode
+                                )?;
+                                println!("[Anvil] Loading guest from stdin ({} bytes) -> {:#?}", guest.as_ref().unwrap().segments.iter().map(|segment| segment.data.len()).sum::<usize>(), load_reg.unwrap());
+                            }
+                            else {
+                                vm.set_entry_point(mem_reg, kernel.entry_point, None, kernel.cpu_mode)?;
+                            }
                         }
                     }
                     println!("[Anvil] Memory allocated: {} MB -> {:#?}", memory, mem_reg);
@@ -162,13 +195,13 @@ fn main() -> Result<()> {
                                     if event.path == canonicalize(path)? {
                                         let contents = fs::read(&kernel_file)?;
                                         let current_hash = simple_hash(&contents);
-                                                                                
+                                        
                                         if last_hash == current_hash {
                                             continue;
                                         }
                                         else {
                                             last_hash = current_hash;
-                                            file_found = true;
+                                           file_found = true;
                                             break;
                                         }
                                     }
@@ -198,10 +231,10 @@ fn main() -> Result<()> {
                         }
                     }
                 }
-                
+
                 Ok(())
             });
-            
+
             ctrlc::set_handler(move || {
                 println!("[Anvil] Shutting down...");
                 ctrl_c.store(true, Ordering::Relaxed);
@@ -215,8 +248,8 @@ fn main() -> Result<()> {
 }
 
 fn run_vm(kernel_file: &String, memory: usize, mem_reg: Register, guest_file: Option<&String>, guest_kernel: Option<LoadedKernel>, guest_info: Option<GuestInfo>, tx: &Sender<CancelToken>) -> Result<()> {
-    let kernel = parse_kernel(&kernel_file)?;
-    
+    let kernel = parse_kernel(Some(&kernel_file))?;
+
     println!("[Anvil] Loading kernel: {} ({} bytes)", &kernel_file, kernel.segments.iter().map(|segment| segment.data.len()).sum::<usize>());
     
     let mut vm = AnvilVm::create_vm(memory)?;
@@ -226,16 +259,21 @@ fn run_vm(kernel_file: &String, memory: usize, mem_reg: Register, guest_file: Op
     }
     match guest_kernel {
         Some(kernel) => {
-            println!("[Anvil] Loading guest: {} ({} bytes) -> {:#?}", guest_file.unwrap(), kernel.segments.iter().map(|segment| segment.data.len()).sum::<usize>(), guest_info.as_ref().unwrap().load_reg);
+            match guest_file {
+                Some(file) => {
+                    println!("[Anvil] Loading guest: {} ({} bytes) -> {:#?}", file, kernel.segments.iter().map(|segment| segment.data.len()).sum::<usize>(), guest_info.as_ref().unwrap().load_reg);
+                }
+                None => println!("[Anvil] Loading guest from stdin ({} bytes) -> {:#?}", kernel.segments.iter().map(|segment| segment.data.len()).sum::<usize>(), guest_info.as_ref().unwrap().load_reg)
+            }
             for bin in kernel.segments.iter() {
                 vm.0.load_binary(&bin.data, bin.guest_addr)?;
             }
         }
         None => ()
     }
-    
+
     println!("[Anvil] Memory allocated: {} MB -> {:#?}", memory, mem_reg);
-    
+
     vm.0.set_entry_point(mem_reg, kernel.entry_point, guest_info, kernel.cpu_mode)?;
     let exit_reason = vm.0.run(&tx);
     match exit_reason {
